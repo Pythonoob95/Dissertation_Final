@@ -1,0 +1,11 @@
+,Value
+Sharpe (Model),0.6523052716056015
+Correlation with SG Trend,0.6595732990826625
+Tracking Error (vs SG Trend),0.09721457058022813
+Autocorrelation (1d),0.07220745155733067
+Autocorrelation (5d),-0.02590804956934281
+Max Drawdown,-0.35675281286239624
+Hit Rate,0.5566936208445642
+Instrument Vol Target,0.12
+Portfolio Vol Target,0.12
+Leverage Cap,2.0

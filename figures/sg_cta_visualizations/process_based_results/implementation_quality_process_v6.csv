@@ -1,0 +1,2 @@
+start,end,days,corr,R2,TE,IR,rep_ann_return,bench_ann_return,mean_overlay,pct_days_at_cap,pct_days_at_floor,mean_live_L1,avg_replication_cost_bps_per_day,avg_overlay_cost_bps_per_day
+2001-12-31,2024-03-29,5805,0.73511013,0.54038690,0.06414343,0.22461922,0.04859715,0.03479955,1.42391972,0.07080103,0.00000000,0.99965547,0.00084902,0.01257572

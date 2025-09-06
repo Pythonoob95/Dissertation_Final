@@ -1,0 +1,11 @@
+,Value
+Sharpe (Model),0.664379526449757
+Correlation with NEIXCTA,0.6629933319310779
+Tracking Error (vs NEIXCTA),0.07864221592993276
+Autocorrelation (1d),0.05954291433485247
+Autocorrelation (5d),-0.008603650852588742
+Max Drawdown,-0.2350333333015442
+Hit Rate,0.548607367475292
+Instrument Vol Target,0.12
+Portfolio Vol Target,0.12
+Leverage Cap,2.0
