@@ -1,0 +1,1622 @@
+from __future__ import annotations
+import os
+import gzip
+import pickle
+import logging
+import warnings
+from dataclasses import dataclass
+from collections import defaultdict
+from pathlib import Path
+from datetime import datetime
+import numpy as np
+import pandas as pd
+import matplotlib
+import matplotlib.pyplot as plt
+import seaborn as sns
+from tqdm import tqdm
+from sklearn.linear_model import ElasticNet, LinearRegression
+from sklearn.model_selection import TimeSeriesSplit
+from scipy import stats
+from pandas.tseries.offsets import BDay
+import matplotlib.dates as mdates
+from matplotlib.colors import LinearSegmentedColormap
+from matplotlib.patches import Rectangle, Patch
+from matplotlib.ticker import PercentFormatter
+from . import config
+
+logging.basicConfig(level=os.getenv("LOGLEVEL", "INFO"), format="%(asctime)s | %(levelname)-7s | %(message)s")
+logger = logging.getLogger("sg_cta")
+
+warnings.filterwarnings("ignore")
+plt.style.use('seaborn-v0_8-whitegrid')
+plt.rcParams.update({'figure.dpi': 100, 'savefig.dpi': 300, 'font.size': 10, 'font.family': 'serif', 'axes.labelsize': 11, 'axes.titlesize': 12, 'legend.fontsize': 9, 'xtick.labelsize': 9, 'ytick.labelsize': 9, 'axes.grid': True, 'grid.alpha': 0.30, 'lines.linewidth': 1.5, 'figure.facecolor': 'white', 'axes.facecolor': 'white'})
+
+BASE_DIR = Path(config.DATA_DIR)
+AUDIT_DIR = BASE_DIR / "audit_trail"; AUDIT_DIR.mkdir(exist_ok=True)
+ARCHIVE_DIR = BASE_DIR / "audit_archive"; ARCHIVE_DIR.mkdir(exist_ok=True)
+VIZ_DIR = Path(config.FIGURES_DIR) / "sg_cta_visualizations"; VIZ_DIR.mkdir(exist_ok=True)
+RB_DIR = VIZ_DIR / "returns_based_results"; RB_DIR.mkdir(exist_ok=True)
+WEIGHT_HISTORY_DIR = BASE_DIR / "weight_history"; WEIGHT_HISTORY_DIR.mkdir(exist_ok=True)
+
+SHOW_PLOTS = os.getenv("SHOW_PLOTS", "1").strip() not in {"0", "false", "False", ""}
+N_JOBS = int(os.getenv("N_JOBS", min(4, os.cpu_count() or 1)))
+
+try:
+    from joblib import Parallel, delayed
+    JOBLIB_AVAILABLE = True
+except Exception:
+    JOBLIB_AVAILABLE = False
+    logger.info("joblib not available — alpha tuning will run sequentially")
+
+try:
+    import optuna
+    OPTUNA_AVAILABLE = True
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+except Exception:
+    OPTUNA_AVAILABLE = False
+
+BENCH_NAME = "NEIXCTA"
+BENCH_SLUG = "NEIXCTA"
+BENCH_LABEL = "NEIXCTA (excess)"
+BENCH_ALIASES = {"NEIXCTA", "SG_CTA", "CTA"}
+IS_TREND = False
+
+def savefig_and_maybe_show(fig, outpath: Path, *, show: bool = SHOW_PLOTS, dpi: int = 300):
+    outpath.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(outpath, dpi=dpi, bbox_inches='tight')
+    if show:
+        try:
+            fig.canvas.manager.set_window_title(outpath.name)
+        except Exception:
+            pass
+        try:
+            plt.show(block=False)
+        except Exception:
+            plt.show()
+    else:
+        plt.close(fig)
+    return outpath
+
+_DEFAULT_COLORS = {'small': '#1f77b4', 'large': '#2ca02c', 'blended': '#d62728', 'benchmark': '#9467bd', 'normal': '#2c3e50', 'crisis': '#e74c3c'}
+try:
+    COLOR_PALETTE = {**_DEFAULT_COLORS, **dict(config.SG_TREND_COLORS)}
+except Exception:
+    COLOR_PALETTE = dict(_DEFAULT_COLORS)
+
+REGIME_COLORS = {'strong_bear': '#8b0000', 'bear': '#dc143c', 'weak_bear': '#ff6347', 'neutral': '#ffd700', 'weak_bull': '#90ee90', 'bull': '#32cd32', 'strong_bull': '#006400'}
+
+AGS_DROP = {"CORN","SOYBEANS","WHEAT","SUGAR","COFFEE","COCOA","COTTON","ZC","ZS","ZW","C","S","W","SB","KC","CC","CT","KW","CORN_MINI","WHEAT_MINI"}
+
+def _non_ag_cols(cols):
+    return [c for c in cols if c not in AGS_DROP]
+
+CRISIS_PERIODS = [('2007-07-01', '2009-03-31', 'GFC'), ('2011-05-01', '2011-10-31', 'EU Debt'), ('2015-08-01', '2016-02-29', 'China/Oil'), ('2020-02-15', '2020-04-30', 'COVID-19'), ('2022-02-15', '2022-10-31', 'Ukraine/Inflation')]
+
+VERSION = "i"
+
+@dataclass
+class RiskConfig:
+    instrument_vol_target: float = 0.12
+    portfolio_vol_target: float = 0.12
+    max_leverage_cap: float = 2.0
+    vol_halflife: int = 40
+
+DEFAULT_RISK_CONFIG = RiskConfig()
+
+def to_utc(obj):
+    if isinstance(obj, pd.DatetimeIndex):
+        return obj.tz_localize("UTC") if obj.tz is None else obj.tz_convert("UTC")
+    if isinstance(obj, pd.Series):
+        ser = pd.to_datetime(obj, errors="coerce")
+        tz = getattr(ser.dt, "tz", None)
+        return ser.dt.tz_localize("UTC") if tz is None else ser.dt.tz_convert("UTC")
+    ts = pd.to_datetime(obj, errors="coerce")
+    if isinstance(ts, pd.Timestamp):
+        return ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
+    return ts
+
+def load_rf(cache: Path | None = None, src: Path | None = None, first_date: str = "1990-01-02") -> pd.Series:
+    if cache is None:
+        cache = BASE_DIR / "tbill_daily.parquet"
+    if src is None:
+        src = Path(config.SG_TREND_INPUT_DIR) / "US3MT=RR.xlsx"
+    if cache.exists():
+        out = pd.read_parquet(cache)["rf_daily"]
+        if getattr(out.index, "tz", None) is None:
+            out.index = out.index.tz_localize("UTC")
+        return out
+    DAY_COUNT = 360
+    tb = (pd.read_excel(src, sheet_name="Table Data", parse_dates=["Date"]).rename(columns={"US3MT=RR (BID_YIELD)": "y"}).dropna(subset=["Date"]))
+    tb["y"] = pd.to_numeric(tb["y"], errors="coerce") / 100 / DAY_COUNT
+    tb = (tb.set_index("Date").sort_index()[["y"]])
+    tb.index = to_utc(tb.index)
+    first_date_tz = pd.Timestamp(first_date).tz_localize("UTC")
+    full_range = pd.date_range(first_date_tz, pd.Timestamp.utcnow().normalize(), freq="B", tz="UTC")
+    tb = tb.reindex(full_range).ffill().bfill().rename(columns={"y": "rf_daily"}).astype("float32")
+    tb.to_parquet(cache, compression="snappy")
+    return tb["rf_daily"]
+
+def rescale_to_target(ret: pd.Series, *, half_life: int | None = None, ann_bdays: int = 252, target: float | None = None, scale_cap: float | None = None, risk_config: RiskConfig | None = None) -> pd.Series:
+    if risk_config is None:
+        risk_config = DEFAULT_RISK_CONFIG
+    if half_life is None:
+        half_life = risk_config.vol_halflife
+    if target is None:
+        target = risk_config.instrument_vol_target
+    if scale_cap is None:
+        scale_cap = risk_config.max_leverage_cap
+    ret = pd.to_numeric(ret, errors="coerce").astype("float64")
+    if ret.isna().all():
+        return ret
+    sigma = ret.ewm(halflife=half_life, adjust=False).std().shift(1) * np.sqrt(ann_bdays)
+    eps = max(np.finfo(float).eps, 1e-12)
+    sigma_clipped = sigma.clip(lower=eps)
+    scale_factor = (target / sigma_clipped).clip(upper=scale_cap)
+    scaled = (scale_factor * ret).astype("float64")
+    return scaled
+
+def ema_update(prev: pd.Series, new: pd.Series, alpha: float) -> pd.Series:
+    return alpha * new + (1 - alpha) * prev
+
+def trailing_vol(series: pd.Series, lookback: int = 252) -> float:
+    if len(series) < max(10, lookback // 4):
+        return np.nan
+    return float(series.rolling(lookback).std().iloc[-1] * np.sqrt(252))
+
+def classify_regime(rolling_sharpe: float) -> str:
+    if rolling_sharpe < -2:
+        return 'strong_bear'
+    if rolling_sharpe < -1:
+        return 'bear'
+    if rolling_sharpe < -0.5:
+        return 'weak_bear'
+    if rolling_sharpe < 0.5:
+        return 'neutral'
+    if rolling_sharpe < 1:
+        return 'weak_bull'
+    if rolling_sharpe < 2:
+        return 'bull'
+    return 'strong_bull'
+
+def annotate_crisis_periods(ax, y_position: str = 'top'):
+    xlim = ax.get_xlim()
+    for start, end, label in CRISIS_PERIODS:
+        sdt = pd.to_datetime(start).tz_localize(None)
+        edt = pd.to_datetime(end).tz_localize(None)
+        sn, en = mdates.date2num(sdt), mdates.date2num(edt)
+        if en < xlim[0] or sn > xlim[1]:
+            continue
+        ax.axvspan(sdt, edt, alpha=0.15, color=COLOR_PALETTE['crisis'], zorder=0)
+        y_pos = ax.get_ylim()[1] * 0.95 if y_position == 'top' else ax.get_ylim()[0] * 1.05
+        mid = sdt + (edt - sdt) / 2
+        ax.text(mid, y_pos, label, ha='center', va='center', fontsize=8, bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7))
+
+def create_performance_table(metrics_dict: dict, title: str = "Performance Metrics"):
+    fig, ax = plt.subplots(figsize=(10, max(4, len(metrics_dict) * 0.4)))
+    ax.axis('tight'); ax.axis('off')
+    df = pd.DataFrame(list(metrics_dict.items()), columns=['Metric', 'Value'])
+    formatted = []
+    for _, row in df.iterrows():
+        v = row['Value']
+        if isinstance(v, (int, float)):
+            if 'Sharpe' in row['Metric'] or 'Correlation' in row['Metric']:
+                formatted.append(f"{v:.3f}")
+            elif '%' in row['Metric'] or 'Return' in row['Metric'] or 'Volatility' in row['Metric']:
+                formatted.append(f"{v * 100:.1f}%")
+            else:
+                formatted.append(f"{v:.2f}")
+        else:
+            formatted.append(str(v))
+    df['Value'] = formatted
+    table = ax.table(cellText=df.values, colLabels=df.columns, cellLoc='left', loc='center')
+    table.auto_set_font_size(False); table.set_fontsize(10); table.scale(1.2, 1.5)
+    for i in range(len(df.columns)):
+        table[(0, i)].set_facecolor('#34495e'); table[(0, i)].set_text_props(weight='bold', color='white')
+    for i in range(1, len(df) + 1):
+        if i % 2 == 0:
+            for j in range(len(df.columns)):
+                table[(i, j)].set_facecolor('#ecf0f1')
+    ax.set_title(title, fontsize=14, weight='bold', pad=20)
+    return fig
+
+def mode_suffix(mode: str) -> str:
+    return "" if mode == "dual" else f"_{mode}"
+
+def tune_alphas_kfold_cv(X_train: pd.DataFrame, y_train: pd.Series, lookback: int, alpha_grid=None, l1_ratio: float = 0.5, n_splits: int = 5, rng_seed: int = 42, min_instruments: int = 5, min_val_window: int = 20, warm_start_alpha: float | None = None, training_window: int = 756) -> float:
+    if lookback > training_window:
+        logger.warning(f"Lookback {lookback} > training_window {training_window} — continuing with guard rails")
+    common_idx = X_train.index.intersection(y_train.index)
+    X, y = X_train.loc[common_idx], y_train.loc[common_idx]
+    end = len(X)
+    start = max(0, end - training_window)
+    X, y = X.iloc[start:end], y.iloc[start:end]
+    if len(X) < max(lookback * (n_splits + 1), 120):
+        return warm_start_alpha or 1e-3
+    if warm_start_alpha is not None:
+        alpha_grid = np.logspace(np.log10(warm_start_alpha * 0.5), np.log10(warm_start_alpha * 2.0), 7)
+    elif alpha_grid is None:
+        alpha_grid = np.logspace(-4, -2, 10)
+    cv_results: dict[float, list[float]] = {float(a): [] for a in alpha_grid}
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+    for _, (tr_idx, val_idx) in enumerate(tscv.split(X)):
+        if len(val_idx) < min_val_window:
+            continue
+        val_start_from_beginning = tr_idx[0] + len(tr_idx) + len(val_idx)
+        if val_start_from_beginning > training_window:
+            excess = val_start_from_beginning - training_window
+            if excess >= len(val_idx):
+                continue
+            val_idx = val_idx[:-excess]
+        X_tr, y_tr = X.iloc[tr_idx], y.iloc[tr_idx]
+        X_val, y_val = X.iloc[val_idx], y.iloc[val_idx]
+        if len(X_tr) < lookback:
+            continue
+        for alpha in alpha_grid:
+            pnl_fold = []
+            for t in range(len(X_val)):
+                val_pos = val_idx[t]
+                lb_start = max(0, val_pos - lookback)
+                X_fit, y_fit = X.iloc[lb_start:val_pos], y.iloc[lb_start:val_pos]
+                active = X_fit.columns[X_fit.notna().sum() > 0]
+                if len(active) < min_instruments:
+                    continue
+                model = ElasticNet(l1_ratio=l1_ratio, alpha=float(alpha), fit_intercept=False, max_iter=10000, random_state=rng_seed)
+                model.fit(X_fit[active].fillna(0.0).values, y_fit.values)
+                coef = pd.Series(0.0, index=X.columns)
+                coef[active] = model.coef_
+                pnl_fold.append(float(X_val.iloc[t].fillna(0.0) @ coef))
+            if len(pnl_fold) > min_val_window // 2:
+                sharpe = (np.mean(pnl_fold) / (np.std(pnl_fold, ddof=1) + 1e-12)) * np.sqrt(252)
+                cv_results[float(alpha)].append(float(sharpe))
+    best_alpha, best_avg_sharpe = warm_start_alpha or 1e-3, -np.inf
+    for alpha, sharpes in cv_results.items():
+        if sharpes:
+            avg_s = float(np.median(sharpes))
+            if avg_s > best_avg_sharpe:
+                best_avg_sharpe, best_alpha = avg_s, float(alpha)
+    return float(best_alpha)
+
+def tune_alphas_quarterly(X_full: pd.DataFrame, y_full: pd.Series, current_date: pd.Timestamp, lookbacks=(20, 25, 30, 35, 40), alpha_grid=None, l1_ratio: float = 0.5, n_splits: int = 5, training_window: int = 756, rng_seed: int = 42, min_instruments: int = 5, min_val_window: int = 20, previous_alphas: dict | None = None, persist_to_disk: bool = True, universe_name: str = "") -> dict:
+    mask = X_full.index <= current_date
+    X_av, y_av = X_full.loc[mask], y_full.loc[mask]
+    X_train = X_av.iloc[-training_window:]
+    y_train = y_av.loc[X_train.index]
+    logger.info(f"Re-optimizing alphas @ {current_date.date()} | window: {X_train.index[0].date()} → {X_train.index[-1].date()}")
+    use_parallel = JOBLIB_AVAILABLE and len(lookbacks) > 1 and N_JOBS > 1
+    if use_parallel:
+        logger.info(f"Parallel alpha tuning for {len(lookbacks)} windows with {N_JOBS} jobs")
+        results = Parallel(n_jobs=N_JOBS, prefer="threads")(delayed(tune_alphas_kfold_cv)(X_train, y_train, w, None, l1_ratio, n_splits, rng_seed + w, min_instruments, min_val_window, previous_alphas.get(w) if previous_alphas else None, training_window) for w in lookbacks)
+        alpha_star = dict(zip(lookbacks, results))
+    else:
+        alpha_star = {}
+        for w in lookbacks:
+            warm = previous_alphas.get(w) if previous_alphas else None
+            a = tune_alphas_kfold_cv(X_train, y_train, w, None, l1_ratio, n_splits, rng_seed + w, min_instruments, min_val_window, warm, training_window)
+            alpha_star[w] = float(a)
+            logger.info(f"  w={w:<2d} → α*={alpha_star[w]:.2e}" + (f" (warm-start {warm:.2e})" if warm else ""))
+    if persist_to_disk:
+        quarter = f"{current_date.year}Q{(current_date.month - 1)//3 + 1}"
+        fn = AUDIT_DIR / f"alphas_{universe_name}_{quarter}_{current_date.strftime('%Y%m%d')}.pkl.gz"
+        with gzip.open(fn, "wb") as f:
+            pickle.dump({'date': current_date, 'alphas': alpha_star, 'lookbacks': lookbacks, 'training_window': training_window, 'universe': universe_name, 'rev': VERSION}, f)
+        logger.info(f"Saved compressed alphas → {fn}")
+    return alpha_star
+
+def _build_single_universe(X_raw: pd.DataFrame, y: pd.Series, lookbacks, alpha_grid, l1_ratio, risk_config, ann_bdays, rng_seed, min_instruments, initial_training_window, min_history_pct, blend_win, oos_start_date, oos_coefficient_window, n_splits, training_window, min_val_window, allow_missing_instruments, persist_artifacts, universe_name: str = "", freeze_coefficients: bool = False, alpha_ema: float = 0.33, track_turnover: bool = True) -> dict:
+    alpha_star = {w: 1e-3 for w in lookbacks}
+    X_scaled = pd.DataFrame(index=X_raw.index, columns=X_raw.columns, dtype="float64")
+    for col in X_raw.columns:
+        X_scaled[col] = rescale_to_target(X_raw[col].astype("float64"), risk_config=risk_config)
+    common = X_scaled.index.intersection(y.index)
+    X, y = X_scaled.loc[common].copy(), y.loc[common].astype("float64")
+    train_val_end_date = pd.to_datetime(oos_start_date).tz_localize('UTC') - pd.Timedelta(days=1) if oos_start_date else X.index[-1]
+    first_tune_date = X.index[min(initial_training_window - 1, len(X) - 1)]
+    quarter_end_limit = train_val_end_date if freeze_coefficients else X.index[-1]
+    quarter_ends = pd.date_range(first_tune_date, quarter_end_limit, freq='Q')
+    quarter_ends = quarter_ends[quarter_ends <= quarter_end_limit]
+    logger.info(f"Quarterly alpha tuning ({universe_name}) | mode: {'FROZEN after OOS' if freeze_coefficients else 'LIVE'}")
+    alpha_history: dict[pd.Timestamp, dict] = {}
+    previous_alphas = None
+    alpha_stability_metrics = {w: {'alphas': [], 'dates': []} for w in lookbacks}
+    for qe in tqdm(quarter_ends, desc=f"Tuning ({universe_name})"):
+        alpha_history[qe] = tune_alphas_quarterly(X_full=X, y_full=y, current_date=qe, lookbacks=lookbacks, alpha_grid=alpha_grid, l1_ratio=l1_ratio, n_splits=n_splits, training_window=training_window, rng_seed=rng_seed, min_instruments=min_instruments, min_val_window=min_val_window, previous_alphas=previous_alphas, persist_to_disk=persist_artifacts, universe_name=universe_name)
+        previous_alphas = alpha_history[qe]
+        for w in lookbacks:
+            if w in alpha_history[qe]:
+                alpha_stability_metrics[w]['alphas'].append(alpha_history[qe][w])
+                alpha_stability_metrics[w]['dates'].append(qe)
+    if first_tune_date not in alpha_history:
+        alpha_history[first_tune_date] = tune_alphas_quarterly(X_full=X, y_full=y, current_date=first_tune_date, lookbacks=lookbacks, alpha_grid=alpha_grid, l1_ratio=l1_ratio, n_splits=n_splits, training_window=training_window, rng_seed=rng_seed, min_instruments=min_instruments, min_val_window=min_val_window, previous_alphas=None, persist_to_disk=persist_artifacts, universe_name=universe_name)
+    predictions_per_model = pd.DataFrame(index=X.index, columns=lookbacks, dtype="float64")
+    initial_burn_in = max(lookbacks) + 2
+    last_valid_coeffs = {w: pd.Series(0.0, index=X.columns, dtype="float64") for w in lookbacks}
+    ema_coef = {w: None for w in lookbacks}
+    weight_history = {w: pd.DataFrame(index=X.index, columns=X.columns, dtype="float32") for w in lookbacks} if track_turnover else {}
+    dropped_instruments_set: set[str] = set()
+    dropped_events = []
+    persistence_usage = defaultdict(int)
+    total_predictions = defaultdict(int)
+    final_coeffs: dict[int, pd.Series] = {}
+    if freeze_coefficients and oos_start_date:
+        logger.info(f"Determining frozen coefficients for OOS ({universe_name})…")
+        X_ins = X.loc[:train_val_end_date]
+        y_ins = y.loc[:train_val_end_date]
+        final_alphas = alpha_history[max(k for k in alpha_history.keys() if k <= train_val_end_date)]
+        for w in lookbacks:
+            win = min(oos_coefficient_window, len(X_ins))
+            X_fit, y_fit = X_ins.iloc[-win:], y_ins.iloc[-win:]
+            if allow_missing_instruments:
+                active = X_fit.columns[X_fit.notna().sum() >= 1]
+            else:
+                active = X_fit.columns[X_fit.notna().sum() >= int(win * min_history_pct * 0.5)]
+            model = ElasticNet(l1_ratio=l1_ratio, alpha=float(final_alphas.get(w, 1e-3)), fit_intercept=False, max_iter=10000, random_state=rng_seed)
+            model.fit(X_fit[active].fillna(0.0).values, y_fit.values)
+            coef = pd.Series(0.0, index=X.columns, dtype="float64"); coef[active] = model.coef_
+            final_coeffs[w] = coef; last_valid_coeffs[w] = coef.copy(); ema_coef[w] = coef.copy()
+        if persist_artifacts:
+            fn = AUDIT_DIR / f"frozen_coeffs_{universe_name}_{pd.to_datetime(oos_start_date).strftime('%Y%m%d')}.pkl.gz"
+            with gzip.open(fn, "wb") as f:
+                pickle.dump({'date': oos_start_date, 'coefficients': final_coeffs, 'lookbacks': lookbacks, 'universe': universe_name, 'frozen': True, 'rev': VERSION}, f)
+            logger.info(f"Saved frozen OOS coefficients → {fn}")
+    for t in tqdm(range(initial_burn_in, len(X)), desc=f"WF ({universe_name})"):
+        current_date = X.index[t]
+        is_oos = bool(oos_start_date) and (current_date >= pd.to_datetime(oos_start_date).tz_localize('UTC'))
+        use_frozen = is_oos and freeze_coefficients and final_coeffs
+        if not use_frozen:
+            valid_dates = [d for d in alpha_history.keys() if d <= current_date]
+            alpha_star = alpha_history[max(valid_dates)] if valid_dates else alpha_history[first_tune_date]
+        for w in lookbacks:
+            if use_frozen:
+                coef = final_coeffs[w]
+            else:
+                X_fit = X.iloc[t - w:t]
+                y_fit = y.loc[X_fit.index]
+                if allow_missing_instruments:
+                    active = X_fit.columns[X_fit.notna().sum() >= 1]
+                else:
+                    active = X_fit.columns[X_fit.notna().sum() >= int(w * min_history_pct)]
+                total_predictions[w] += 1
+                if len(active) < min_instruments:
+                    coef = last_valid_coeffs[w].copy()
+                    persistence_usage[w] += 1
+                    dropped = set(X_fit.columns) - set(active)
+                    dropped_instruments_set.update(dropped)
+                    dropped_events.append((current_date, w, dropped))
+                else:
+                    alpha = float(alpha_star.get(w, 1e-3))
+                    model = ElasticNet(l1_ratio=l1_ratio, alpha=alpha, fit_intercept=False, max_iter=10000, random_state=rng_seed)
+                    model.fit(X_fit[active].fillna(0.0).values, y_fit.values)
+                    coef = pd.Series(0.0, index=X.columns, dtype="float64"); coef[active] = model.coef_
+                    last_valid_coeffs[w] = coef.copy()
+            ema_coef[w] = coef.copy() if (ema_coef[w] is None) else ema_update(ema_coef[w], coef, alpha_ema)
+            smooth_coef = ema_coef[w]
+            if track_turnover:
+                weight_history[w].loc[current_date] = smooth_coef.astype("float32")
+            predictions_per_model.loc[current_date, w] = float(X.iloc[t].fillna(0.0) @ smooth_coef)
+    if np.isinf(predictions_per_model.values).any():
+        raise ValueError("Infinities detected in predictions_per_model")
+    if pd.isna(predictions_per_model).sum().sum() > 0:
+        logger.warning("NaN values found in predictions_per_model (will forward-fill where necessary)")
+    beta_hist = pd.DataFrame(index=predictions_per_model.index, columns=list(lookbacks) + ['intercept'], dtype="float64")
+    for i, ts in enumerate(predictions_per_model.index):
+        data_for_fit = predictions_per_model.iloc[:i]
+        if len(data_for_fit) < blend_win:
+            continue
+        y_blend = y.loc[data_for_fit.index].tail(blend_win)
+        X_blend = data_for_fit.tail(blend_win)
+        mask = X_blend.notna().all(axis=1)
+        Xb, yb = X_blend.loc[mask], y_blend.loc[mask]
+        if len(Xb) < max(30, int(0.5 * blend_win)):
+            continue
+        reg = LinearRegression(fit_intercept=True).fit(Xb, yb)
+        beta_hist.loc[ts, Xb.columns] = reg.coef_
+        beta_hist.loc[ts, 'intercept'] = float(reg.intercept_)
+    beta_hist = beta_hist.ffill()
+    weighted_predictions = (predictions_per_model * beta_hist.drop('intercept', axis=1)).sum(axis=1)
+    blended_preds = weighted_predictions.ffill()
+    combined_signal = blended_preds + beta_hist['intercept']
+    pnl_final = rescale_to_target(combined_signal, target=risk_config.portfolio_vol_target, risk_config=risk_config).dropna().astype("float32")
+    persistence_pct = {w: (persistence_usage[w] / total_predictions[w] * 100) if total_predictions[w] else 0.0 for w in lookbacks}
+    avg_persistence_pct = float(np.mean(list(persistence_pct.values()))) if persistence_pct else 0.0
+    turnover_metrics = {}
+    if track_turnover:
+        for w in lookbacks:
+            dfw = weight_history[w].dropna(how='all')
+            if len(dfw) > 1:
+                daily_turn = dfw.diff().abs().sum(axis=1)
+                turnover_metrics[w] = {'mean_daily': float(daily_turn.mean()), 'std_daily': float(daily_turn.std()), 'annual': float(daily_turn.mean() * 252)}
+        if persist_artifacts:
+            for w in lookbacks:
+                WEIGHT_HISTORY_DIR.mkdir(exist_ok=True, parents=True)
+                (weight_history[w].astype('float16').to_parquet(WEIGHT_HISTORY_DIR / f"weights_{universe_name}_w{w}.parquet", compression='gzip'))
+            logger.info(f"Saved weight history → {WEIGHT_HISTORY_DIR}")
+    if universe_name and hasattr(X_raw, 'columns'):
+        winsor_warning_file = Path(config.FUTURES_INPUT_DIR) / "winsorization_warnings.txt"
+        if winsor_warning_file.exists():
+            with open(winsor_warning_file, 'r') as f:
+                high_clip_instruments = set([line.strip() for line in f.readlines() if line.strip()])
+            overlap = high_clip_instruments.intersection(dropped_instruments_set)
+            if overlap:
+                overlap_pct = len(overlap) / max(1, len(high_clip_instruments)) * 100
+                logger.warning(f"High clipping ∩ persistence overlap: {len(overlap)} instruments ({overlap_pct:.1f}%) — {sorted(overlap)}")
+    stability_metrics = {}
+    return {'combined': pnl_final, 'final_alphas': final_coeffs if (freeze_coefficients and oos_start_date) else alpha_star, 'alpha_history': alpha_history, 'beta_history': beta_hist.astype('float32'), 'predictions_per_model': predictions_per_model.astype('float32'), 'dropped_instruments_count': len(dropped_events), 'dropped_instruments_unique': sorted(list(dropped_instruments_set)), 'dropped_events': dropped_events[:100], 'persistence_usage_pct': persistence_pct, 'avg_persistence_pct': avg_persistence_pct, 'freeze_mode': freeze_coefficients, 'ema_coef_final': {w: coef.astype('float32') for w, coef in ema_coef.items() if coef is not None}, 'weight_history': None, 'turnover_metrics': turnover_metrics if track_turnover else None, 'stability_metrics': stability_metrics, 'risk_config': risk_config}
+
+def build_replica_walk_forward_dual_universe(X_raw_small: pd.DataFrame, X_raw_large: pd.DataFrame, y: pd.Series, lookbacks=(20, 25, 30, 35, 40), alpha_grid=None, l1_ratio: float = 0.5, risk_config: RiskConfig | None = None, ann_bdays: int = 252, rng_seed: int = 42, min_instruments: int = 5, initial_training_window: int = 756, min_history_pct: float = 0.7, blend_win: int = 756, oos_start_date: str | None = None, oos_coefficient_window: int = 756, n_splits: int = 5, training_window: int = 756, min_val_window: int = 20, return_details: bool = True, allow_missing_instruments: bool = False, persist_artifacts: bool = True, freeze_coefficients: bool = False, alpha_ema: float = 0.33, track_turnover: bool = True, rebal_freq: str = "Q") -> dict:
+    if risk_config is None:
+        risk_config = DEFAULT_RISK_CONFIG
+    if not freeze_coefficients and oos_start_date:
+        logger.info("*** LIVE TUNING MODE: Coefficients continue re-tuning after OOS date ***")
+    elif freeze_coefficients and oos_start_date:
+        logger.info("*** FROZEN MODE: Coefficients frozen after OOS date ***")
+    logger.info(f"Dual-universe replica: small={X_raw_small.shape[1]} | large={X_raw_large.shape[1]}")
+    logger.info(f"min_history_pct={min_history_pct}, EMA alpha={alpha_ema}, rebal={rebal_freq}, jobs={N_JOBS}")
+    logger.info(f"Risk config: inst_vol={risk_config.instrument_vol_target:.1%}, port_vol={risk_config.portfolio_vol_target:.1%}, cap={risk_config.max_leverage_cap:.2f}")
+    if max(lookbacks) > training_window:
+        logger.warning(f"Max lookback {max(lookbacks)} exceeds training_window {training_window}")
+    results_small = _build_single_universe(X_raw_small, y, lookbacks, alpha_grid, l1_ratio, risk_config, ann_bdays, rng_seed, min_instruments, initial_training_window, min_history_pct, blend_win, oos_start_date, oos_coefficient_window, n_splits, training_window, min_val_window, allow_missing_instruments, persist_artifacts, universe_name="small", freeze_coefficients=freeze_coefficients, alpha_ema=alpha_ema, track_turnover=track_turnover)
+    results_large = _build_single_universe(X_raw_large, y, lookbacks, alpha_grid, l1_ratio, risk_config, ann_bdays, rng_seed, min_instruments, initial_training_window, min_history_pct, blend_win, oos_start_date, oos_coefficient_window, n_splits, training_window, min_val_window, allow_missing_instruments, persist_artifacts, universe_name="large", freeze_coefficients=freeze_coefficients, alpha_ema=alpha_ema, track_turnover=track_turnover)
+    pnl_small, pnl_large = results_small['combined'], results_large['combined']
+    common_idx = pnl_small.index.intersection(pnl_large.index)
+    pnl_small, pnl_large = pnl_small.loc[common_idx], pnl_large.loc[common_idx]
+    if rebal_freq == "Q":
+        blend_dates = pnl_small.index.to_series().groupby(pnl_small.index.to_period("Q")).first()
+    else:
+        blend_dates = pnl_small.index.to_series().groupby(pnl_small.index.year).first()
+    weights = pd.Series(0.5, index=pnl_small.index, dtype="float32")
+    for dt in blend_dates:
+        win = slice(dt - pd.Timedelta(days=252), dt - pd.Timedelta(days=1))
+        vol_s = trailing_vol(pnl_small.loc[win])
+        vol_l = trailing_vol(pnl_large.loc[win])
+        if np.isfinite(vol_s) and np.isfinite(vol_l) and (vol_s + vol_l) > 0:
+            w_small = float(vol_l / (vol_s + vol_l))
+            weights.loc[dt + BDay(1):] = w_small
+            logger.info(f"Blend @ {dt.date()} → small={w_small:.2%}, large={1-w_small:.2%} (effective { (dt + BDay(1)).date() })")
+    pnl_blended = (weights * pnl_small + (1 - weights) * pnl_large).astype("float32")
+    logger.info(f"Blended P&L length: {len(pnl_blended)} days | Sharpe={pnl_blended.mean()/pnl_blended.std()*np.sqrt(252):.2f}")
+    if return_details:
+        return {'combined': pnl_blended, 'small_results': results_small, 'large_results': results_large, 'blend_weights': weights.astype("float32"), 'blend_sharpe': float(pnl_blended.mean() / pnl_blended.std() * np.sqrt(252)), 'small_sharpe': float(pnl_small.mean() / pnl_small.std() * np.sqrt(252)), 'large_sharpe': float(pnl_large.mean() / pnl_large.std() * np.sqrt(252)), 'freeze_coefficients': freeze_coefficients, 'rebal_freq': rebal_freq, 'risk_config': risk_config}
+    return pnl_blended
+
+def compute_drawdown_attribution(results: dict, benchmark: pd.Series, n_top: int = 5) -> dict:
+    try:
+        ret = results['combined'].copy()
+        if not all(k in results for k in ('small_results', 'large_results', 'blend_weights')):
+            return {}
+        pnl_small = results['small_results']['combined'].copy()
+        pnl_large = results['large_results']['combined'].copy()
+        w_small = results['blend_weights'].copy()
+        idx = ret.index
+        pnl_small = pnl_small.reindex(idx).ffill().bfill()
+        pnl_large = pnl_large.reindex(idx).ffill().bfill()
+        w_small = w_small.reindex(idx).ffill().bfill().clip(0.0, 1.0)
+        equity = (1.0 + ret).cumprod()
+        rolling_max = equity.cummax()
+        dd = equity / rolling_max - 1.0
+        troughs = dd.nsmallest(min(n_top, len(dd))).index
+        dd_attr = {}
+        for i, t in enumerate(troughs, start=1):
+            prior_e = equity.loc[:t]
+            prior_rm = rolling_max.loc[:t]
+            peaks = prior_e[prior_e == prior_rm]
+            if peaks.empty:
+                continue
+            start = peaks.index[-1]
+            peak_val = equity.loc[start]
+            after = equity.loc[t:]
+            rec = after[after >= peak_val]
+            end = rec.index[0] if len(rec) else equity.index[-1]
+            win_idx = ret.loc[start:end].index
+            s_contrib = (w_small.loc[win_idx] * pnl_small.loc[win_idx]).cumsum()
+            l_contrib = ((1.0 - w_small.loc[win_idx]) * pnl_large.loc[win_idx]).cumsum()
+            total = ret.loc[win_idx].cumsum()
+            max_dd = float(dd.loc[win_idx].min())
+            dd_attr[f"DD{i}"] = {'period': {'start': start, 'end': end, 'max_drawdown': max_dd}, 'small_contrib': s_contrib, 'large_contrib': l_contrib, 'total': total}
+        return dd_attr
+    except Exception as e:
+        print(f"compute_drawdown_attribution failed: {e}")
+        return {}
+
+def run_extended_diagnostics(results, benchmark, oos_start_date, analysis_out: Path, color_palette, regime_colors, annotate_crisis_periods_fn, *, mode="dual", include_persistence=False, include_alpha_stability=True, show_plots: bool = SHOW_PLOTS):
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    from scipy import stats
+    import matplotlib.dates as mdates
+    from matplotlib.patches import Patch
+    from matplotlib.ticker import PercentFormatter
+    ret = results['combined']
+    benchmark = benchmark.loc[ret.index]
+    has_small = 'small_results' in results and isinstance(results.get('small_results'), dict)
+    has_large = 'large_results' in results and isinstance(results.get('large_results'), dict)
+    pnl_small = results['small_results']['combined'] if has_small else (results['combined'] if not has_large else None)
+    pnl_large = results['large_results']['combined'] if has_large else (results['combined'] if not has_small else None)
+    analysis_out.mkdir(parents=True, exist_ok=True)
+    def _calculate_drawdown(returns):
+        cum = (1 + returns).cumprod()
+        run_max = cum.expanding().max()
+        return (cum - run_max) / run_max
+    try:
+        print("\n=== EXT C — Turnover & Cost Diagnostics ===")
+        t_small = results.get('small_results', {}).get('turnover_metrics', {})
+        t_large = results.get('large_results', {}).get('turnover_metrics', {})
+        t_single = results.get('turnover_metrics', {}) if (not t_small and not t_large) else {}
+        if t_single:
+            fig, ax = plt.subplots(figsize=(8, 6))
+            lbs = sorted(t_single.keys())
+            ann_turn = [t_single[w]['annual'] for w in lbs]
+            bar_color = (color_palette.get('large') if mode == "large_only" else color_palette.get('small'))
+            title_prefix = "Large" if mode == "large_only" else "Small"
+            ax.bar([f'{w}d' for w in lbs], ann_turn, color=bar_color, alpha=0.7)
+            ax.set_title(f'{title_prefix} — Annual Turnover (Returns-Based)')
+            ax.set_xlabel('Lookback'); ax.set_ylabel('Annual Turnover')
+            ax.grid(True, alpha=0.3, axis='y')
+            savefig_and_maybe_show(fig, analysis_out / "C_turnover_by_lookback_rev26.png", show=show_plots)
+        elif t_small or t_large:
+            fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+            if t_small:
+                lbs = sorted(t_small.keys())
+                axes[0].bar([f'{w}d' for w in lbs], [t_small[w]['annual'] for w in lbs], color=color_palette.get('small'), alpha=0.7)
+                axes[0].set_title('Small — Annual Turnover (Returns-Based)')
+                axes[0].set_xlabel('Lookback'); axes[0].set_ylabel('Annual Turnover')
+                axes[0].grid(True, alpha=0.3, axis='y')
+            else:
+                axes[0].text(0.5, 0.5, "No turnover (small)", ha='center', va='center'); axes[0].axis('off')
+            if t_large:
+                lbs = sorted(t_large.keys())
+                axes[1].bar([f'{w}d' for w in lbs], [t_large[w]['annual'] for w in lbs], color=color_palette.get('large'), alpha=0.7)
+                axes[1].set_title('Large — Annual Turnover (Returns-Based)')
+                axes[1].set_xlabel('Lookback'); axes[1].set_ylabel('Annual Turnover')
+                axes[1].grid(True, alpha=0.3, axis='y')
+            else:
+                axes[1].text(0.5, 0.5, "No turnover (large)", ha='center', va='center'); axes[1].axis('off')
+            savefig_and_maybe_show(fig, analysis_out / "C_turnover_by_lookback_rev26.png", show=show_plots)
+        else:
+            print("Skipping C — no turnover metrics found.")
+        suffix = mode_suffix(mode)
+        if t_single:
+            rows = [{'lookback': int(lb), 'mean_daily': float(t_single[lb]['mean_daily']), 'std_daily': float(t_single[lb]['std_daily']), 'annual': float(t_single[lb]['annual'])} for lb in sorted(t_single.keys())]
+        else:
+            rows = []
+            if t_small:
+                rows += [{'universe': 'small', 'lookback': int(lb), 'mean_daily': float(t_small[lb]['mean_daily']), 'std_daily': float(t_small[lb]['std_daily']), 'annual': float(t_small[lb]['annual'])} for lb in sorted(t_small.keys())]
+            if t_large:
+                rows += [{'universe': 'large', 'lookback': int(lb), 'mean_daily': float(t_large[lb]['mean_daily']), 'std_daily': float(t_large[lb]['std_daily']), 'annual': float(t_large[lb]['annual'])} for lb in sorted(t_large.keys())]
+        if rows:
+            pd.DataFrame(rows).to_csv(analysis_out / f"turnover_by_lookback_rev26{suffix}.csv", index=False)
+    except Exception as e:
+        print(f"C failed: {e}")
+    try:
+        print("\n=== EXT D — Universe Contribution Heatmap ===")
+        coeffs_container = results.get('large_results') if has_large else (results.get('small_results') if has_small else results)
+        coeffs = coeffs_container.get('ema_coef_final', None) if isinstance(coeffs_container, dict) else None
+        if coeffs:
+            sectors = {'Currencies': ['AUD', 'CAD', 'CHF', 'EUR', 'GBP', 'JPY'], 'Bonds': ['US2Y', 'US5Y', 'US10Y', 'BOBL', 'BUND'], 'Equities': ['S&P500', 'NASDAQ', 'DOW', 'EUROSTOXX', 'DAX', 'FTSE', 'TOPIX', 'HSI'], 'Commodities': ['WTI_CRUDE', 'BRENT_CRUDE', 'GASOIL', 'GOLD', 'SILVER', 'COPPER']}
+            sector_weights = {}
+            for lookback, coef in coeffs.items():
+                w_by_sector = {}
+                for sector, insts in sectors.items():
+                    w_by_sector[sector] = float(coef[coef.index.isin(insts)].abs().sum())
+                total = float(sum(w_by_sector.values())) + 1e-12
+                sector_weights[f'{lookback}d'] = {k: v/total for k, v in w_by_sector.items()}
+            if sector_weights:
+                dfw = pd.DataFrame(sector_weights).T
+                fig, ax = plt.subplots(figsize=(10, 6))
+                sns.heatmap(dfw, annot=True, fmt='.2%', cmap='YlOrRd', cbar_kws={'label': 'Risk Allocation (%)'}, ax=ax)
+                ax.set_title('Risk Allocation by Sector and Lookback', fontsize=14, weight='bold'); ax.set_xlabel('Sector'); ax.set_ylabel('Lookback')
+                savefig_and_maybe_show(fig, analysis_out / "D_universe_contribution_heatmap_rev26.png", show=show_plots)
+            else:
+                print("D skipped — coefficients empty.")
+        else:
+            print("D skipped — ema_coef_final not found.")
+    except Exception as e:
+        print(f"D failed: {e}")
+    try:
+        print("\n=== EXT E — Lookback Model Blend Weights ===")
+        if has_small and 'beta_history' in results['small_results']:
+            beta_hist = results['small_results']['beta_history']
+        elif has_large and 'beta_history' in results['large_results']:
+            beta_hist = results['large_results']['beta_history']
+        else:
+            beta_hist = results.get('beta_history', None)
+        if beta_hist is not None and not beta_hist.empty:
+            beta_no_inter = beta_hist.drop(columns=['intercept'], errors='ignore')
+            denom = beta_no_inter.sum(axis=1).replace(0, np.nan)
+            beta_norm = beta_no_inter.div(denom, axis=0).fillna(0.0)
+            fig, ax = plt.subplots(figsize=(14, 6))
+            cols = list(beta_norm.columns)
+            ax.stackplot(beta_norm.index, [beta_norm[c] for c in cols], labels=[f'{c}d' for c in cols], alpha=0.85)
+            ax.set_title('Evolution of Lookback Blend Weights', fontsize=14, weight='bold')
+            ax.set_ylabel('Normalized Weight'); ax.set_xlabel('Date'); ax.set_ylim(0, 1)
+            ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1)); ax.grid(True, alpha=0.3)
+            if oos_start_date:
+                ax.axvline(pd.to_datetime(oos_start_date), color='black', linestyle='--', alpha=0.7, linewidth=2)
+            savefig_and_maybe_show(fig, analysis_out / "E_lookback_blend_weights_rev26.png", show=show_plots)
+        else:
+            print("E skipped — no beta_history available.")
+    except Exception as e:
+        print(f"E failed: {e}")
+    try:
+        print("\n=== F — Residuals Diagnostics (Model − Benchmark) ===")
+        suffix = mode_suffix(mode)
+        res = (ret - benchmark).dropna()
+        res.to_frame("residual").to_csv(analysis_out / f"rb_residuals_daily_rev26{suffix}.csv")
+        fig, ax = plt.subplots(figsize=(14, 6))
+        ax.hist(res, bins=60, alpha=0.85, edgecolor='black')
+        ax.set_title('Residuals — Daily (Model − Benchmark)', fontsize=14, weight='bold')
+        ax.set_xlabel('Residual (daily return)'); ax.set_ylabel('Frequency')
+        ax.grid(True, alpha=0.3)
+        savefig_and_maybe_show(fig, analysis_out / f"F_residuals_hist_rev26{suffix}.png", show=show_plots)
+        fig, ax = plt.subplots(figsize=(14, 6))
+        res.cumsum().plot(ax=ax, lw=1.8, color=COLOR_PALETTE.get('blended', '#d62728'))
+        ax.set_title('Cumulative Residual P&L (Alpha over Benchmark)', fontsize=14, weight='bold')
+        ax.set_ylabel('Cumulative residual (sum of daily returns)'); ax.set_xlabel('Date')
+        ax.grid(True, alpha=0.3)
+        if oos_start_date:
+            ax.axvline(pd.to_datetime(oos_start_date), color='gray', linestyle='--', alpha=0.7)
+        annotate_crisis_periods_fn(ax)
+        savefig_and_maybe_show(fig, analysis_out / f"F_residuals_cum_rev26{suffix}.png", show=show_plots)
+    except Exception as e:
+        print(f"F residuals failed: {e}")
+    try:
+        print("\n=== EXT F — Drawdown Attribution ===")
+        dd_attr = compute_drawdown_attribution(results, benchmark, n_top=5)
+        if dd_attr:
+            fig, axes = plt.subplots(len(dd_attr), 1, figsize=(14, 2.6*len(dd_attr)), sharex=False)
+            axes = [axes] if len(dd_attr) == 1 else list(axes)
+            for ax, (dd_name, dd_data) in zip(axes, dd_attr.items()):
+                dates = dd_data['small_contrib'].index
+                svals = dd_data['small_contrib'].values
+                lvals = dd_data['large_contrib'].values
+                ax.fill_between(dates, 0, svals, color=color_palette['small'], alpha=0.7, label='Small')
+                ax.fill_between(dates, svals, svals + lvals, color=color_palette['large'], alpha=0.7, label='Large')
+                ax.plot(dates, dd_data['total'], color=color_palette['blended'], linewidth=2, label='Total')
+                p = dd_data['period']
+                ax.set_title(f"Drawdown {p['start'].date()} → {p['end'].date()} (Max {p['max_drawdown']:.1%})", fontsize=11)
+                ax.set_ylabel('Cum P&L'); ax.axhline(0, color='black', alpha=0.3)
+                ax.legend(fontsize=9); ax.grid(True, alpha=0.3)
+                ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m')); ax.xaxis.set_major_locator(mdates.MonthLocator(interval=1))
+                plt.setp(ax.xaxis.get_majorticklabels(), rotation=45)
+            savefig_and_maybe_show(fig, analysis_out / "F_drawdown_attribution_rev26.png", show=show_plots)
+        else:
+            print("F skipped — attribution needs dual components.")
+    except Exception as e:
+        print(f"F failed: {e}")
+    try:
+        print("\n=== EXT H — Drawdown Analysis ===")
+        dd_blended = _calculate_drawdown(ret)
+        dd_bench = _calculate_drawdown(benchmark)
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
+        ax1.fill_between(dd_blended.index, 0, dd_blended*100, color=color_palette['blended'], alpha=0.7, label='Strategy')
+        ax1.plot(dd_bench.index, dd_bench*100, color=color_palette['benchmark'], lw=2, label=BENCH_NAME)
+        ax1.set_ylabel('Drawdown (%)'); ax1.set_title('Drawdown: Strategy vs Benchmark', fontsize=12, weight='bold'); ax1.legend(); ax1.grid(True, alpha=0.3); ax1.set_ylim(top=1)
+        dd_diff = dd_blended - dd_bench
+        ax2.fill_between(dd_diff.index, 0, dd_diff*100, where=(dd_diff >= 0), alpha=0.5, color=color_palette['normal'], label='Strategy Better')
+        ax2.fill_between(dd_diff.index, 0, dd_diff*100, where=(dd_diff < 0), alpha=0.5, color=color_palette['crisis'], label='Benchmark Better')
+        ax2.set_ylabel('DD Diff (%)'); ax2.set_xlabel('Date'); ax2.legend(); ax2.grid(True, alpha=0.3); ax2.axhline(0, color='black', alpha=0.5)
+        for ax in (ax1, ax2):
+            annotate_crisis_periods_fn(ax)
+            if oos_start_date:
+                ax.axvline(pd.to_datetime(oos_start_date), color='gray', linestyle='--', alpha=0.7)
+        savefig_and_maybe_show(fig, analysis_out / "H_drawdown_analysis_rev26.png", show=show_plots)
+    except Exception as e:
+        print(f"H failed: {e}")
+    try:
+        print("\n=== EXT I — Monthly Return Heatmap ===")
+        monthly_ret = ret.resample('M').sum() * 100
+        years = monthly_ret.index.year
+        months = monthly_ret.index.month
+        dfp = pd.DataFrame({'Year': years, 'Month': months, 'Return': monthly_ret.values})
+        heat = dfp.pivot(index='Year', columns='Month', values='Return')
+        colors = [(0.8,0,0), (1,1,1), (0,0.8,0)]
+        cmap = LinearSegmentedColormap.from_list('custom', colors, N=100)
+        fig, ax = plt.subplots(figsize=(14, 8))
+        sns.heatmap(heat, annot=True, fmt='.1f', cmap=cmap, center=0, cbar_kws={'label': 'Monthly Return (%)'}, ax=ax, xticklabels=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'])
+        ax.set_title('Monthly Returns Heatmap', fontsize=14, weight='bold'); ax.set_xlabel('Month'); ax.set_ylabel('Year')
+        savefig_and_maybe_show(fig, analysis_out / "I_monthly_return_heatmap_rev26.png", show=show_plots)
+    except Exception as e:
+        print(f"I failed: {e}")
+    try:
+        print("\n=== Y — Calendar-Year Bars (Model, Benchmark, Alpha) ===")
+        suffix = mode_suffix(mode)
+        ann_model = ret.resample('Y').sum()
+        ann_bench = benchmark.resample('Y').sum().reindex(ann_model.index)
+        ann_alpha = ann_model - ann_bench
+        out = pd.DataFrame({'model': ann_model, 'benchmark': ann_bench, 'alpha': ann_alpha})
+        out.index = out.index.year
+        out.index.name = 'year'
+        out.to_csv(analysis_out / f"Y_calendar_year_bars_rev26{suffix}.csv")
+        fig, ax = plt.subplots(figsize=(14, 8))
+        x = np.arange(len(out))
+        width = 0.27
+        ax.bar(x - width, out['model'].to_numpy(), width, label='Model', alpha=0.9, color=COLOR_PALETTE.get('blended', '#d62728'))
+        ax.bar(x, out['benchmark'].to_numpy(), width, label=BENCH_NAME, alpha=0.9, color=COLOR_PALETTE.get('benchmark', '#9467bd'))
+        ax.bar(x + width, out['alpha'].to_numpy(), width, label=f"Alpha (Model − {BENCH_NAME})", alpha=0.9, color=COLOR_PALETTE.get('normal', '#2c3e50'))
+        ax.set_xticks(x); ax.set_xticklabels(out.index.astype(int), rotation=0)
+        ax.set_title('Calendar-Year Returns', fontsize=14, weight='bold')
+        ax.set_xlabel('Year'); ax.set_ylabel('Return')
+        ax.yaxis.set_major_formatter(PercentFormatter(1.0))
+        ax.grid(True, alpha=0.3, axis='y'); ax.legend()
+        savefig_and_maybe_show(fig, analysis_out / f"Y_calendar_year_bars_rev26{suffix}.png", show=show_plots)
+    except Exception as e:
+        print(f"Y calendar-year bars failed: {e}")
+    try:
+        print("\n=== RB Extra — Blender vs Residuals ===")
+        if has_large and 'beta_history' in results['large_results']:
+            beta_hist = results['large_results']['beta_history']
+        elif has_small and 'beta_history' in results['small_results']:
+            beta_hist = results['small_results']['beta_history']
+        else:
+            beta_hist = results.get('beta_history', None)
+        if beta_hist is not None and not beta_hist.empty:
+            res = (ret - benchmark).dropna()
+            beta_no_inter = beta_hist.drop(columns=['intercept'], errors='ignore').fillna(0.0)
+            drift = beta_no_inter.diff().abs().sum(axis=1).reindex(res.index).fillna(0.0)
+            te63 = (res.rolling(63).std() * np.sqrt(252))
+            fig, ax1 = plt.subplots(figsize=(14,6))
+            ax1.plot(te63.index, te63, label='63d Residual TE (annualized)', lw=1.5)
+            ax1.yaxis.set_major_formatter(PercentFormatter(1.0)); ax1.set_ylabel('Residual TE'); ax1.grid(True, alpha=0.3)
+            ax2 = ax1.twinx()
+            ax2.plot(drift.index, drift, label='Daily Blender Drift (Σ|Δβ|)', lw=1.0, alpha=0.7, color=COLOR_PALETTE.get('normal'))
+            ax1.set_title('Residual TE vs Lookback Blender Drift', fontsize=14, weight='bold')
+            ax1.legend(loc='upper left'); ax2.legend(loc='upper right')
+            savefig_and_maybe_show(fig, analysis_out / f"RB_blender_weight_vs_residuals_rev26{mode_suffix(mode)}.png", show=show_plots)
+        else:
+            print("RB Extra: no beta_history found — skipped.")
+    except Exception as e:
+        print(f"RB Extra (blender vs residuals) failed: {e}")
+    try:
+        print("\n=== RB Extra — Lookback Contribution to Alpha (monthly) ===")
+        if has_large and 'predictions_per_model' in results['large_results']:
+            cont = results['large_results']
+        elif has_small and 'predictions_per_model' in results['small_results']:
+            cont = results['small_results']
+        else:
+            cont = results if 'predictions_per_model' in results else None
+        if cont is not None:
+            preds = cont['predictions_per_model'].copy()
+            bh = cont.get('beta_history', pd.DataFrame(index=preds.index, columns=list(preds.columns)+['intercept'])).fillna(0.0)
+            res = (ret - benchmark).reindex(preds.index).dropna()
+            preds = preds.reindex(res.index).fillna(0.0)
+            bh = bh.reindex(res.index).fillna(0.0)
+            raw = (preds.abs() * bh.drop(columns=['intercept'], errors='ignore').abs())
+            share = raw.div(raw.sum(axis=1).replace(0, np.nan), axis=0).fillna(0.0)
+            daily_contrib = share.mul(res, axis=0)
+            monthly = daily_contrib.resample('M').sum()
+            fig, ax = plt.subplots(figsize=(14, 7))
+            labels = [f'{c}d' for c in monthly.columns]
+            ax.stackplot(monthly.index, [monthly[c].values for c in monthly.columns], labels=labels, alpha=0.9)
+            ax.set_title('Lookback Contribution to Alpha (monthly sum)', fontsize=14, weight='bold')
+            ax.set_ylabel('Alpha (monthly sum of daily residual)'); ax.set_xlabel('Date'); ax.grid(True, alpha=0.3)
+            ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1))
+            savefig_and_maybe_show(fig, analysis_out / f"RB_lookback_alpha_contribution_rev26{mode_suffix(mode)}.png", show=show_plots)
+        else:
+            print("RB Extra: no predictions_per_model — skipped.")
+    except Exception as e:
+        print(f"RB Extra (alpha contribution) failed: {e}")
+    print("\nExtended diagnostics complete.")
+
+def monitor_implementation_quality(results: dict, y: pd.Series) -> pd.DataFrame:
+    pnl = results['combined']
+    common_idx = pnl.index.intersection(y.index)
+    risk_config = results.get('risk_config', DEFAULT_RISK_CONFIG)
+    metrics = {'Sharpe (Model)': float(pnl.mean() / pnl.std() * np.sqrt(252)), f'Correlation with {BENCH_NAME}': float(pnl.corr(y.loc[common_idx])), f'Tracking Error (vs {BENCH_NAME})': float((pnl - y.loc[common_idx]).std() * np.sqrt(252)), 'Autocorrelation (1d)': float(pnl.autocorr(lag=1)), 'Autocorrelation (5d)': float(pnl.autocorr(lag=5)), 'Max Drawdown': float((pnl.cumsum() - pnl.cumsum().expanding().max()).min()), 'Hit Rate': float((pnl > 0).mean()), 'Instrument Vol Target': risk_config.instrument_vol_target, 'Portfolio Vol Target': risk_config.portfolio_vol_target, 'Leverage Cap': risk_config.max_leverage_cap}
+    if 'small_results' in results:
+        sp = results['small_results']['combined']
+        metrics['Small Universe Sharpe'] = float(sp.mean() / sp.std() * np.sqrt(252))
+    if 'large_results' in results:
+        lp = results['large_results']['combined']
+        metrics['Large Universe Sharpe'] = float(lp.mean() / lp.std() * np.sqrt(252))
+    if 'freeze_coefficients' in results:
+        metrics['Freeze Mode Used'] = bool(results.get('freeze_coefficients'))
+    if 'rebal_freq' in results:
+        metrics['Rebalancing Frequency'] = results.get('rebal_freq')
+    return pd.DataFrame(metrics, index=['Value']).T
+
+def analyze_persistence_usage(results: dict) -> None:
+    for universe in ['small_results', 'large_results']:
+        if universe in results:
+            udata = results[universe]
+            uname = universe.split('_')[0].capitalize()
+            print(f"\n{uname} Universe Persistence Analysis:")
+            avg_pct = float(udata.get('avg_persistence_pct', 0))
+            print(f"  Average persistence usage: {avg_pct:.1f}%")
+            per = udata.get('persistence_usage_pct', {})
+            if per:
+                print("  By lookback window:")
+                for lookback, pct in sorted(per.items()):
+                    print(f"    {lookback}d: {pct:.1f}%")
+            uniq_drop = udata.get('dropped_instruments_unique', [])
+            if uniq_drop:
+                print(f"  Affected instruments: {', '.join(map(str, uniq_drop))}")
+            if avg_pct > 20:
+                print("  CRITICAL: Very high persistence → investigate data quality")
+            elif avg_pct > 10:
+                print("  WARNING: High persistence → consider relaxing filters")
+            else:
+                print("  Persistence usage within normal range")
+
+def calculate_detailed_metrics(returns, benchmark, period_name, apply_burnin=True, burn_in_days=189):
+    if apply_burnin and len(returns) > burn_in_days:
+        returns = returns.iloc[burn_in_days:]
+        benchmark = benchmark.loc[returns.index]
+    ann = np.sqrt(252)
+    m = {}
+    m['Period'] = period_name
+    m['Annual Return'] = float(returns.mean() * 252)
+    m['Annual Volatility'] = float(returns.std() * ann)
+    m['Sharpe Ratio'] = float(m['Annual Return'] / (m['Annual Volatility'] + 1e-12))
+    m['Correlation'] = float(returns.corr(benchmark))
+    m['R-squared'] = float(m['Correlation'] ** 2)
+    m['Tracking Error'] = float((returns - benchmark).std() * ann)
+    m['Max Drawdown'] = float((returns.cumsum().cummax() - returns.cumsum()).max())
+    m['Skewness'] = float(returns.skew())
+    m['Excess Kurtosis'] = float(returns.kurtosis())
+    m['95% VaR'] = float(returns.quantile(0.05))
+    m['Hit Rate'] = float((returns > 0).mean())
+    return m
+
+def process_sg_cta_data():
+    DATA_DIR = Path(config.SG_TREND_INPUT_DIR)
+    rf = load_rf()
+    FILTER_START = pd.Timestamp("2000-01-03", tz="UTC")
+    FILTER_END = pd.Timestamp("2024-03-29", tz="UTC")
+    excel_path = DATA_DIR / "SG CTA Indexes Correct.xlsx"
+    book = pd.ExcelFile(excel_path)
+    excess_map = {}
+    for sheet in book.sheet_names:
+        df = pd.read_excel(book, sheet_name=sheet, parse_dates=["Date"])
+        if "Last Price" not in df.columns:
+            continue
+        idx = (df[["Date", "Last Price"]].dropna().assign(Date=lambda d: to_utc(d["Date"])).set_index("Date").sort_index().asfreq("B").ffill(limit=1).bfill(limit=1)).loc[FILTER_START:FILTER_END]
+        pct_daily = idx["Last Price"].pct_change()
+        mu, sigma = pct_daily.mean(), pct_daily.std()
+        pct_daily = pct_daily.clip(lower=mu - 5*sigma, upper=mu + 5*sigma)
+        rf_al = rf.reindex(pct_daily.index).ffill().bfill()
+        excess_daily = (pct_daily - rf_al).astype("float32")
+        slug = sheet.replace(" ", "_")
+        excess_map[slug] = excess_daily
+        print(f"{sheet:<24}| rows {len(excess_daily):6,d}")
+    key = next((k for k in excess_map if any(a in k.upper() for a in BENCH_ALIASES)), None)
+    if key is None:
+        raise ValueError(f"Could not find CTA sheet in '{excel_path.name}'. Searched aliases: {sorted(BENCH_ALIASES)} among {sorted(excess_map.keys())}")
+    y_excess = excess_map[key]
+    sg_trading_dates = y_excess.index
+    pd.to_pickle(sg_trading_dates, DATA_DIR / "sg_cta_calendar.pkl")
+    pd.to_pickle(y_excess, DATA_DIR / f"y_excess_{BENCH_SLUG}.pkl")
+    print(f"y_excess_{BENCH_SLUG} written — {y_excess.count():,d} days")
+    return y_excess
+
+def process_futures_data():
+    PRICE_DIR = Path(config.FUTURES_INPUT_DIR) / "multiple_prices_csv"
+    ROLL_DIR = Path(config.FUTURES_INPUT_DIR) / "roll_calendars_csv"
+    CFG_DIR = Path(config.FUTURES_INPUT_DIR) / "csvconfig"
+    OUT_DIR = Path(config.FUTURES_INPUT_DIR) / "adjusted_prices_csv"
+    ROLL_OFFSET_BD = 5
+    SKIP = {"HANGTECH", "IBEX"} | {p.stem for p in PRICE_DIR.glob("*_micro.csv")} | {p.stem for p in PRICE_DIR.glob("*_mini.csv")} | AGS_DROP
+    FILTER_START = pd.Timestamp("2000-01-03", tz="UTC")
+    FILTER_END = pd.Timestamp("2024-03-29", tz="UTC")
+    inst = pd.read_csv(CFG_DIR / "instrumentconfig.csv").set_index("Instrument")
+    cost = pd.read_csv(CFG_DIR / "spreadcosts.csv").set_index("Instrument")
+    rf = load_rf()
+    winsorization_stats = []
+    high_clipping_instruments = []
+    def winsorise_series(s: pd.Series, z: float = 5.0, window: int = 2520, min_window: int = 504):
+        if s.notna().sum() < 250:
+            return s, 0, 0.0
+        effective_min = max(min_window, window // 2)
+        cutoff_date = pd.Timestamp("2003-01-01", tz="UTC")
+        expanding_stats = s.expanding(min_periods=250)
+        mu = pd.Series(index=s.index, dtype='float64')
+        sigma = pd.Series(index=s.index, dtype='float64')
+        early_mask = s.index < cutoff_date
+        if early_mask.any():
+            rolling_early = s.rolling(window=window, min_periods=effective_min)
+            mu[early_mask] = rolling_early.mean()[early_mask].fillna(expanding_stats.mean()[early_mask])
+            sigma[early_mask] = rolling_early.std()[early_mask].fillna(expanding_stats.std()[early_mask])
+        late_mask = ~early_mask
+        if late_mask.any():
+            rolling_strict = s.rolling(window=window, min_periods=window)
+            mu[late_mask] = rolling_strict.mean()[late_mask].fillna(expanding_stats.mean()[late_mask])
+            sigma[late_mask] = rolling_strict.std()[late_mask].fillna(expanding_stats.std()[late_mask])
+        mask = mu.notna() & sigma.notna()
+        clipped = s.copy()
+        clipped[mask] = s[mask].clip(lower=mu[mask] - z*sigma[mask], upper=mu[mask] + z*sigma[mask])
+        n_clipped = ((s[mask] < mu[mask] - z*sigma[mask]) | (s[mask] > mu[mask] + z*sigma[mask])).sum()
+        pct_clipped = float(n_clipped / max(1, mask.sum()) * 100)
+        if pct_clipped > 1.0 and hasattr(s, 'name'):
+            logger.info(f"Winsorization: {s.name} had {pct_clipped:.1f}% observations clipped")
+        return clipped, int(n_clipped), float(pct_clipped)
+    def reshape_to_long(path: Path, root: str) -> pd.DataFrame:
+        wide = pd.read_csv(path)
+        def pick(*alts):
+            for a in alts:
+                if a in wide.columns:
+                    return a
+            raise KeyError(f"{alts} missing in {path.name}")
+        wide = wide.rename(columns={pick("DATETIME", "DATE_TIME", "DATE"): "Date", pick("PRICE", "PX_LAST", "CLOSE"): "Price", pick("PRICE_CONTRACT", "CONTRACT"): "PriceContract", pick("CARRY", "CARRY_LAST"): "Carry", pick("CARRY_CONTRACT"): "CarryContract", pick("FORWARD", "FORWARD_LAST"): "Forward", pick("FORWARD_CONTRACT"): "ForwardContract"})
+        UNIT_FIX = {"Silver": .01, "GAS_": .01, "Corn_mini": .01, "Wheat_mini": .01, "Sugar": .01, "HG1": .01, "RB": .01}
+        fac = next((UNIT_FIX[p] for p in UNIT_FIX if root.startswith(p.rstrip("_"))), 1)
+        wide[["Price", "Carry", "Forward"]] = (wide[["Price", "Carry", "Forward"]].apply(pd.to_numeric, errors="coerce") * fac)
+        price_rows = (wide[["Date", "PriceContract", "Price"]].rename(columns={"PriceContract": "Contract", "Price": "Close"}).assign(Kind="Price"))
+        carry_rows = (wide[["Date", "CarryContract", "Carry"]].rename(columns={"CarryContract": "Contract", "Carry": "Close"}).assign(Kind="Carry"))
+        fwd_rows = (wide[["Date", "ForwardContract", "Forward"]].rename(columns={"ForwardContract": "Contract", "Forward": "Close"}).assign(Kind="Forward"))
+        long = (pd.concat([price_rows, carry_rows, fwd_rows], ignore_index=True).dropna(subset=["Close"]).assign(Date=lambda d: to_utc(pd.to_datetime(d["Date"]).dt.normalize())).sort_values(["Date", "Contract"]))
+        long = long[(long["Date"] >= FILTER_START) & (long["Date"] <= FILTER_END)]
+        return long
+    for csv_path in sorted(PRICE_DIR.glob("*.csv")):
+        root = csv_path.stem
+        if root in SKIP or root.upper() in AGS_DROP:
+            continue
+        long = reshape_to_long(csv_path, root)
+        roll_file = ROLL_DIR / f"{root}.csv"
+        if not roll_file.exists():
+            print(f"{root}: missing roll calendar")
+            continue
+        roll = (pd.read_csv(roll_file, parse_dates=["DATE_TIME"]).rename(columns={"DATE_TIME": "RollDate", "current_contract": "Current", "next_contract": "Next"}).sort_values("RollDate").assign(ExecDate=lambda d: d["RollDate"] - BDay(ROLL_OFFSET_BD)))
+        roll["ExecDate"] = pd.to_datetime(roll["ExecDate"]).dt.tz_localize("UTC")
+        roll = roll[(roll["ExecDate"] >= FILTER_START) & (roll["ExecDate"] <= FILTER_END)]
+        adj_factor, factor = {}, 1.0
+        for cur, nxt, ex in zip(roll["Current"][::-1], roll["Next"][::-1], roll["ExecDate"][::-1]):
+            adj_factor[cur] = factor
+            p_cur = long.query("Contract == @cur & Date == @ex & Kind == 'Price'")["Close"]
+            p_nxt = long.query("Contract == @nxt & Date == @ex & Kind == 'Price'")["Close"]
+            if not p_cur.empty and not p_nxt.empty:
+                ratio = p_nxt.iat[-1] / p_cur.iat[0]
+                factor *= ratio if ratio < 5 else 1/ratio
+        long["AdjPrice"] = long["Close"] * long["Contract"].map(adj_factor).fillna(1.0)
+        price = (long.query("Kind == 'Price'").set_index("Date")["AdjPrice"].groupby("Date").last().ffill(limit=3))
+        gap_mask = price.index.to_series().diff().dt.days.gt(7)
+        price[gap_mask] = np.nan
+        price = price.ffill(limit=3)
+        price = price.loc[FILTER_START:FILTER_END]
+        price_ret = price.pct_change()
+        has_carry = not long.query("Kind == 'Carry'").empty
+        if has_carry:
+            carry = (long.query("Kind == 'Carry'").pivot_table(index="Date", columns="Contract", values="Close", aggfunc="last"))
+            carry_ret = carry.diff().stack().groupby(level=0).sum() / price.shift(1)
+            roll_ret = carry_ret.reindex(price_ret.index).fillna(0.0)
+        else:
+            jumps = {}
+            for cur, nxt, ex in zip(roll["Current"], roll["Next"], roll["ExecDate"]):
+                p_cur = long.query("Contract == @cur & Date == @ex & Kind == 'Price'")["Close"]
+                p_nxt = long.query("Contract == @nxt & Date == @ex & Kind == 'Price'")["Close"]
+                if not p_cur.empty and not p_nxt.empty:
+                    jumps[ex] = p_nxt.iat[0] / p_cur.iat[0] - 1
+            roll_ret = pd.Series(jumps).reindex(price_ret.index).fillna(0.0)
+        total_ret = (price_ret + roll_ret).dropna()
+        roll_flag = (roll_ret.abs() > 1e-12).astype(int)
+        row_ic = inst.loc[root]
+        tick_sz = row_ic.get("TickSize", 0.01)
+        spread = cost.loc[root, "SpreadCost"]
+        spread_pts = spread * tick_sz if spread >= 1 else spread / 1e4 * price.shift(1)
+        tick_pct = spread_pts / price.shift(1)
+        daily_cost = (pd.Series(tick_pct, index=price.index) * roll_flag).reindex(total_ret.index).fillna(0.0).shift(1)
+        rf = load_rf()
+        excess = (total_ret - daily_cost - rf.reindex(total_ret.index).ffill().bfill()).astype("float32")
+        excess = excess.loc[FILTER_START:FILTER_END]
+        excess.name = root
+        excess_clipped, n_clipped, pct_clipped = winsorise_series(excess)
+        excess = excess_clipped
+        winsorization_stats.append({'instrument': root, 'n_observations': int(len(excess)), 'n_clipped': int(n_clipped), 'pct_clipped': float(pct_clipped)})
+        if pct_clipped > 2.0:
+            high_clipping_instruments.append(root)
+        OUT_DIR.mkdir(parents=True, exist_ok=True)
+        excess.to_csv(OUT_DIR / f"{root}_excess_net_ret.csv", float_format="%.8f")
+        price.to_frame("AdjClose").to_csv(OUT_DIR / f"{root}_adj_price.csv", float_format="%.4f")
+        ann_vol = float(excess.std() * np.sqrt(252))
+        print(f"{root:<14}| rows {len(excess):6,d} | σ {ann_vol:.2%} | clipped {pct_clipped:.1f}%")
+    print("\nDone — cleaned files saved in:", OUT_DIR)
+    if high_clipping_instruments:
+        with open(Path(config.FUTURES_INPUT_DIR) / "winsorization_warnings.txt", 'w') as f:
+            f.write('\n'.join(high_clipping_instruments))
+        print(f"Saved {len(high_clipping_instruments)} high-clipping instruments for monitoring")
+    if winsorization_stats:
+        winsor_df = pd.DataFrame(winsorization_stats)
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+        ax1.hist(winsor_df['pct_clipped'], bins=30, color=COLOR_PALETTE.get('normal', '#777'), edgecolor='black', alpha=0.7)
+        ax1.axvline(winsor_df['pct_clipped'].mean(), color=COLOR_PALETTE['crisis'], linestyle='--', linewidth=2, label=f"Mean: {winsor_df['pct_clipped'].mean():.2f}%")
+        ax1.set_xlabel('Pct Clipped (%)'); ax1.set_ylabel('# Instruments'); ax1.set_title('Winsorization Impact'); ax1.legend(); ax1.grid(True, alpha=0.3)
+        top_clipped = winsor_df.nlargest(10, 'pct_clipped')
+        ax2.barh(top_clipped['instrument'], top_clipped['pct_clipped'], color=COLOR_PALETTE.get('large'))
+        ax2.set_xlabel('Pct Clipped (%)'); ax2.set_title('Top 10 Most Winsorized'); ax2.grid(True, alpha=0.3, axis='x')
+        savefig_and_maybe_show(fig, RB_DIR / "winsorization_analysis_rev26.png", show=SHOW_PLOTS)
+        print("\n--- Winsorization Summary ---")
+        print(f"Average clipping: {winsor_df['pct_clipped'].mean():.2f}%")
+        print(f"Median clipping : {winsor_df['pct_clipped'].median():.2f}%")
+        print(f"Max clipping    : {winsor_df['pct_clipped'].max():.2f}% ({winsor_df.loc[winsor_df['pct_clipped'].idxmax(), 'instrument']})")
+        print(f"Instruments >2% : {(winsor_df['pct_clipped'] > 2).sum()}")
+    return winsorization_stats
+
+def build_panel():
+    SRC_DIR = Path(config.FUTURES_INPUT_DIR) / "adjusted_prices_csv"
+    DEST_DIR = Path(config.PANEL_OUTPUT_DIR); DEST_DIR.mkdir(parents=True, exist_ok=True)
+    FILTER_START = pd.Timestamp("2000-01-03", tz="UTC")
+    FILTER_END = pd.Timestamp("2024-03-29", tz="UTC")
+    cal_candidates = [Path(config.SG_TREND_INPUT_DIR) / "sg_cta_calendar.pkl", Path(config.SG_TREND_INPUT_DIR) / "sg_trend_calendar.pkl"]
+    calendar = None
+    for p in cal_candidates:
+        if p.exists():
+            calendar = pd.read_pickle(p)
+            calendar = calendar[(calendar >= FILTER_START) & (calendar <= FILTER_END)]
+            print(f"Using calendar {p.name} with {len(calendar)} trading days")
+            break
+    if calendar is None:
+        print("No saved calendar found — using US business days")
+        calendar = pd.bdate_range(FILTER_START, FILTER_END, tz="UTC")
+    MIN_DAYS = 500
+    BAD_LIST_PATH = BASE_DIR / "bad_contracts.txt"
+    bad_contracts = set(BAD_LIST_PATH.read_text().split()) if BAD_LIST_PATH.exists() else set()
+    series, active = {}, {}
+    for f in SRC_DIR.glob("*_excess_net_ret.csv"):
+        root = f.stem.replace("_excess_net_ret", "")
+        if root in bad_contracts:
+            continue
+        s = (pd.read_csv(f, parse_dates=[0], index_col=0).squeeze("columns").astype("float32"))
+        s.index = to_utc(s.index)
+        s = s.loc[FILTER_START:FILTER_END]
+        series[root] = s.reindex(calendar).ffill(limit=3)
+        active[root] = series[root].notna().astype("int8")
+    valid = [k for k, s in series.items() if s.notna().sum() >= MIN_DAYS]
+    series = {k: series[k] for k in valid}
+    active = {k: active[k] for k in valid}
+    X = pd.concat(series, axis=1).astype("float32")
+    M = pd.concat(active, axis=1)
+    X = X[_non_ag_cols(X.columns)]
+    M = M[X.columns]
+    assert not X.columns.duplicated().any(), "Duplicate tickers in X panel!"
+    assert X.index[0] >= FILTER_START, f"Start {X.index[0]} < {FILTER_START}"
+    assert X.index[-1] <= FILTER_END, f"End {X.index[-1]} > {FILTER_END}"
+    X.to_parquet(DEST_DIR / "X_panel.parquet", compression="snappy")
+    M.to_parquet(DEST_DIR / "M_active_mask.parquet", compression="snappy")
+    print(f"Panel & mask written → {DEST_DIR}")
+    print(f"   • contracts kept : {len(X.columns)}")
+    print(f"   • calendar rows  : {len(X)}")
+    print(f"   • date range     : {X.index[0].date()} → {X.index[-1].date()}")
+    y_path = Path(config.SG_TREND_INPUT_DIR) / f"y_excess_{BENCH_SLUG}.pkl"
+    if y_path.exists():
+        y_excess = pd.read_pickle(y_path)
+        common_dates = X.index.intersection(y_excess.index)
+        print(f"   • Common dates with {BENCH_NAME}: {len(common_dates)} ({len(common_dates) / len(X.index) * 100:.1f}%)")
+    return X, M
+
+def create_large_universe():
+    FILTER_START = pd.Timestamp("2000-01-03", tz="UTC")
+    FILTER_END = pd.Timestamp("2024-03-29", tz="UTC")
+    PANEL_RAW = Path(config.PANEL_OUTPUT_DIR) / "X_panel.parquet"
+    X_raw = pd.read_parquet(PANEL_RAW).astype("float32").loc[FILTER_START:FILTER_END]
+    ALIASES = {"AUD": ["AUD", "6A", "AD"], "CAD": ["CAD", "6C", "CD"], "CHF": ["CHF", "6S", "SF"], "EUR": ["EUR", "EC", "6E"], "GBP": ["GBP", "BP", "6B"], "JPY": ["JPY", "JY", "6J"], "US2Y": ["US2Y", "US2", "TU"], "US5Y": ["US5Y", "US5", "FV"], "US10Y": ["US10Y", "US10", "TY"], "BOBL": ["BOBL"], "BUND": ["BUND", "RX", "BTP"], "S&P500": ["S&P500", "SP500", "ES"], "NASDAQ": ["NASDAQ", "NQ"], "DOW": ["DOW", "YM"], "EUROSTOXX": ["EUROSTOXX", "EUROSTX", "VG", "FESX", "SX5E"], "DAX": ["DAX", "GX", "FDAX"], "FTSE": ["FTSE", "FTSE100", "Z"], "TOPIX": ["TOPIX", "TPX", "NI"], "HSI": ["HSI", "HSI_mini", "HANGSENG"], "WTI_CRUDE": ["CRUDE_W", "WTI_CRUDE", "CL", "CL1"], "BRENT_CRUDE": ["BRENT_LAST", "BRENT_W", "BRE", "BRN", "CO"], "GASOIL": ["GASOIL", "QS", "GO"], "GOLD": ["GOLD", "GC", "GC_MINI"], "SILVER": ["SILVER", "SI"], "COPPER": ["COPPER", "HG", "HG_MINI"], "CORN": ["CORN", "C", "ZC"], "SOYBEANS": ["SOYBEANS", "S", "ZS"], "WHEAT": ["WHEAT", "W", "ZW"]}
+    MIN_DAYS = 500
+    picked, used_lbl = {}, {}
+    for friendly, labels in ALIASES.items():
+        for lbl in labels:
+            s = X_raw.get(lbl)
+            if s is not None and pd.Series(s).notna().sum() >= MIN_DAYS:
+                picked[friendly] = s
+                used_lbl[friendly] = lbl
+                if lbl != friendly:
+                    print(f"→ {friendly}: using alias '{lbl}'")
+                break
+        else:
+            print(f"{friendly}: no usable history — dropped")
+    X_large = (pd.DataFrame(picked).sort_index().astype("float32").dropna(how="all")).loc[FILTER_START:FILTER_END]
+    X_large = X_large[_non_ag_cols(X_large.columns)]
+    OUT = Path(config.PANEL_OUTPUT_DIR) / "X_large_universe"
+    OUT.mkdir(parents=True, exist_ok=True)
+    X_large.to_parquet(OUT / "X_large_universe.parquet", compression="snappy")
+    X_large.to_csv(OUT / "X_large_universe.csv", float_format="%.8f")
+    pd.Series(used_lbl, name="ColumnUsed").to_csv(OUT / "friendly_to_label_map.csv")
+    print("Large-universe panel written →", OUT)
+    return X_large
+
+def create_small_universe():
+    FILTER_START = pd.Timestamp("2000-01-03", tz="UTC")
+    FILTER_END = pd.Timestamp("2024-03-29", tz="UTC")
+    PANEL_RAW = Path(config.PANEL_OUTPUT_DIR) / "X_panel.parquet"
+    X_raw = pd.read_parquet(PANEL_RAW).astype("float32").loc[FILTER_START:FILTER_END]
+    ALIASES = {"AD": ["AD", "AUD", "6A"], "BP": ["BP", "GBP", "6B"], "CD": ["CD", "CAD", "6C"], "EC": ["EC", "EUR", "6E"], "JY": ["JY", "JPY", "6J"], "FV": ["FV", "US5Y", "US5"], "RX": ["RX", "BUND", "BUND10"], "ES": ["ES", "S&P500", "SP500"], "CL": ["CL", "WTI_CRUDE", "CRUDE_W"], "GC": ["GC", "GOLD", "GC_MINI"]}
+    MIN_DAYS = 500
+    picked_cols, friendly_map = [], {}
+    for friendly, alts in ALIASES.items():
+        for lbl in alts:
+            if lbl in X_raw.columns and X_raw[lbl].notna().sum() >= MIN_DAYS:
+                picked_cols.append(lbl); friendly_map[friendly] = lbl
+                if lbl != friendly:
+                    print(f"→ {friendly}: using alias '{lbl}'")
+                break
+        else:
+            print(f"{friendly}: no usable history — dropped")
+    X_small = X_raw[picked_cols].copy().loc[FILTER_START:FILTER_END]
+    OUT_SMALL = Path(config.PANEL_OUTPUT_DIR) / "X_small_universe"
+    OUT_SMALL.mkdir(parents=True, exist_ok=True)
+    X_small.to_parquet(OUT_SMALL / "X_small_universe.parquet", compression="snappy")
+    X_small.to_csv(OUT_SMALL / "X_small_universe.csv", float_format="%.8f")
+    print("Small-universe panel written:", X_small.shape)
+    print("    Columns used:", picked_cols)
+    print(f"    Date range  : {X_small.index[0].date()} → {X_small.index[-1].date()}")
+    return X_small
+
+def create_instrument_config():
+    print("Building instrument configuration…")
+    cfg_dir = BASE_DIR / "cfg"; cfg_dir.mkdir(exist_ok=True)
+    all_instruments = set()
+    large_path = Path(config.PANEL_OUTPUT_DIR) / "X_large_universe/X_large_universe.parquet"
+    small_path = Path(config.PANEL_OUTPUT_DIR) / "X_small_universe/X_small_universe.parquet"
+    if large_path.exists():
+        X_large = pd.read_parquet(large_path); all_instruments.update(X_large.columns)
+    if small_path.exists():
+        X_small = pd.read_parquet(small_path); all_instruments.update(X_small.columns)
+    if not all_instruments:
+        print("No instruments found — run data processing first"); return
+    def guess_asset_class(inst):
+        u = str(inst).upper()
+        direct = {'CRUDE_W':'Energy','SP500':'Equity','S&P500':'Equity','TOPIX':'Equity','US5':'Bond','US5Y':'Bond','US10':'Bond','US10Y':'Bond','US2':'Bond','US2Y':'Bond','US30':'Bond','US30Y':'Bond'}
+        if u in direct: return direct[u]
+        if any(x in u for x in ['CRUDE','OIL','BRENT','WTI','CL','NG','GASOIL','HO','RB']): return 'Energy'
+        if any(x in u for x in ['CORN','WHEAT','SOYBEAN','SUGAR','COFFEE','COCOA','COTTON','C_','S_','W_','KW','CT','SB','CC','KC']): return 'Ags'
+        if any(x in u for x in ['GOLD','SILVER','COPPER','ALUMINUM','PLATINUM','PALLADIUM','GC','SI','HG','AL','PL','PA']): return 'Metals'
+        if any(x in u for x in ['CATTLE','HOGS','LC','LH','FC']): return 'Livestock'
+        if any(x in u for x in ['EUR','GBP','JPY','CHF','AUD','CAD','NZD','MXN','SEK','NOK']) and len(u) <= 6 and not any(x in u for x in ['BOND','RATE','YIELD']): return 'FX'
+        if u.startswith('US') and any(ch.isdigit() for ch in u): return 'Bond'
+        if any(x in u for x in ['TY','FV','TU','ED','FF','ZN','ZB','ZT','ZF','ZQ','GE','BOBL','BUND','BTP','GILT','JGB','BOND','RATE']): return 'Bond'
+        if any(x in u for x in ['TOPIX','SP500','S&P','ES','NQ','NASDAQ','DOW','FTSE','DAX','EUROSTOXX','STOXX','NIKKEI','HANG','HSI','ASX','KOSPI','SENSEX','NIFTY','EMD','RTY','YM','SX5E']): return 'Equity'
+        if any(x in u for x in ['VIX','VX','VSTOXX','VNKY']): return 'Vol'
+        return 'Other'
+    inst_config = pd.DataFrame({'Instrument': sorted(list(all_instruments))})
+    inst_config['AssetClass'] = inst_config['Instrument'].apply(guess_asset_class)
+    cfg_dir.joinpath("instrumentconfig.csv").write_text(inst_config.to_csv(index=False))
+    print(f"instrumentconfig.csv written → {cfg_dir}")
+    print("Asset class breakdown:\n", inst_config['AssetClass'].value_counts())
+    others = inst_config[inst_config['AssetClass'] == 'Other']['Instrument'].tolist()
+    if others:
+        print(f"Instruments classified as 'Other': {others[:20]}{' …' if len(others) > 20 else ''}")
+
+def create_sg_cta_visualizations(results_dual_sg, ret_sg, pnl_small, pnl_large, benchmark, burn_in_end_date, BURN_IN_DAYS, BURN_IN_MONTHS, OOS_START_DATE, TRAIN_VAL_END_DATE, custom_risk_config, ANALYSIS_OUT, mode="dual", show_plots: bool = SHOW_PLOTS):
+    def to_naive(d):
+        if d is None: return None
+        dt = pd.to_datetime(d)
+        if getattr(dt, 'tzinfo', None) is None:
+            dt = dt.tz_localize('UTC')
+        return dt.tz_convert(None)
+    suffix = mode_suffix(mode)
+    print("\n=== Viz A — Cumulative Equity Curves ===")
+    fig, ax = plt.subplots(figsize=(14, 8))
+    series_to_plot = []
+    if mode == "dual":
+        if pnl_small is not None and len(pnl_small) > 0:
+            series_to_plot.append(("Small Universe", pnl_small, COLOR_PALETTE["small"]))
+        if pnl_large is not None and len(pnl_large) > 0:
+            series_to_plot.append(("Large Universe", pnl_large, COLOR_PALETTE["large"]))
+        if ret_sg is not None and len(ret_sg) > 0:
+            series_to_plot.append(("Blended Strategy", ret_sg, COLOR_PALETTE["blended"]))
+    elif mode == "large_only":
+        if pnl_large is not None and len(pnl_large) > 0:
+            series_to_plot.append(("Large Universe (Model)", pnl_large, COLOR_PALETTE["large"]))
+    elif mode == "small_only":
+        if pnl_small is not None and len(pnl_small) > 0:
+            series_to_plot.append(("Small Universe (Model)", pnl_small, COLOR_PALETTE["small"]))
+    if benchmark is not None and len(benchmark) > 0:
+        series_to_plot.append((BENCH_LABEL, benchmark, COLOR_PALETTE["benchmark"]))
+    for label, series, color in series_to_plot:
+        cum_ret = 100 * (1 + series).cumprod()
+        idx = cum_ret.index.tz_convert(None) if getattr(cum_ret.index, 'tz', None) else cum_ret.index
+        ax.plot(idx, cum_ret, lw=1.8, label=label, color=color)
+    burn_span_start = None
+    if ret_sg is not None and len(ret_sg) > 0: burn_span_start = ret_sg.index[0]
+    elif mode == "large_only" and pnl_large is not None and len(pnl_large) > 0: burn_span_start = pnl_large.index[0]
+    elif mode == "small_only" and pnl_small is not None and len(pnl_small) > 0: burn_span_start = pnl_small.index[0]
+    if burn_span_start is not None and burn_in_end_date is not None:
+        ax.axvspan(to_naive(burn_span_start), to_naive(burn_in_end_date), alpha=0.1, color="gray", label=f"{BURN_IN_MONTHS}-Month Burn-in")
+    annotate_crisis_periods(ax)
+    ax.axvline(to_naive(OOS_START_DATE), color="black", linestyle="--", alpha=0.7, linewidth=2, label="OOS Start")
+    ax.set_title(f"Cumulative Growth of $100", fontsize=14, weight="bold")
+    ax.set_ylabel("Portfolio Value ($)"); ax.set_xlabel("Date"); ax.legend(loc="upper left", framealpha=0.9); ax.grid(True, alpha=0.3); ax.set_yscale("log")
+    for label, series, color in series_to_plot:
+        try:
+            final_value = 100 * (1 + series).cumprod().iloc[-1]
+            ts = to_naive(series.index[-1])
+            ax.text(ts, final_value, f"${final_value:.0f}", va="center", fontsize=9, color=color)
+        except Exception:
+            pass
+    savefig_and_maybe_show(fig, ANALYSIS_OUT / f"A_cumulative_equity_curves_rev26{suffix}.png", show=show_plots)
+    print("\n=== Viz B — Rolling Statistics ===")
+    window = 252
+    if ret_sg is None or benchmark is None or len(ret_sg) == 0 or len(benchmark) == 0:
+        print("Missing data for rolling stats; skipping.")
+    else:
+        ret_sg_after = ret_sg.loc[burn_in_end_date:]; bench_after = benchmark.loc[burn_in_end_date:]
+        if len(ret_sg_after) < window + 10:
+            print("Not enough data after burn-in; skipping Chart B.")
+        else:
+            roll_corr = ret_sg_after.rolling(window).corr(bench_after)
+            roll_rs2 = roll_corr ** 2
+            roll_te = (ret_sg_after - bench_after).rolling(window).std() * np.sqrt(252)
+            roll_ir = ((ret_sg_after - bench_after).rolling(window).mean() / (ret_sg_after - bench_after).rolling(window).std()) * np.sqrt(252)
+            fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, 1, figsize=(14, 13), sharex=True)
+            ax1.plot(roll_corr.index, roll_corr, color=COLOR_PALETTE["normal"], lw=1.5)
+            ax1.axhline(y=float(roll_corr.mean()), color="black", linestyle="--", alpha=0.5, label=f"Mean: {float(roll_corr.mean()):.3f}")
+            ax1.set_ylabel("Correlation")
+            ax1.set_title(f"Rolling 1Y Statistics (Ex-Burn-in)", fontsize=12, weight="bold")
+            ax1.legend(); ax1.grid(True, alpha=0.3); ax1.set_ylim(0, 1)
+            c_rs2 = COLOR_PALETTE["blended"] if mode == "dual" else (COLOR_PALETTE["large"] if mode == "large_only" else COLOR_PALETTE["small"])
+            ax2.plot(roll_rs2.index, roll_rs2, color=c_rs2, lw=1.5)
+            ax2.axhline(y=float(roll_rs2.mean()), color="black", linestyle="--", alpha=0.5, label=f"Mean: {float(roll_rs2.mean()):.3f}")
+            ax2.fill_between(roll_rs2.index, 0, roll_rs2, alpha=0.2, color=c_rs2)
+            ax2.set_ylabel("R-squared"); ax2.legend(); ax2.grid(True, alpha=0.3); ax2.set_ylim(0, 1)
+            ax2.text(0.02, 0.95, f"Avg Variance Explained: {float(roll_rs2.mean())*100:.1f}%", transform=ax2.transAxes, bbox=dict(boxstyle="round", facecolor="white", alpha=0.8), va="top", fontsize=9)
+            ax3.plot(roll_te.index, roll_te, color=COLOR_PALETTE["crisis"], lw=1.5)
+            ax3.axhline(y=float(roll_te.mean()), color="black", linestyle="--", alpha=0.5, label=f"Mean: {float(roll_te.mean()):.1%}")
+            ax3.set_ylabel("Tracking Error"); ax3.yaxis.set_major_formatter(PercentFormatter(1.0))
+            ax3.legend(); ax3.grid(True, alpha=0.3)
+            c_ir = COLOR_PALETTE["small"] if mode == "dual" else (COLOR_PALETTE["large"] if mode == "large_only" else COLOR_PALETTE["small"])
+            ax4.plot(roll_ir.index, roll_ir, color=c_ir, lw=1.5)
+            ax4.axhline(y=0, color="black", linestyle="-", alpha=0.5)
+            ax4.axhline(y=float(roll_ir.mean()), color="black", linestyle="--", alpha=0.5, label=f"Mean IR: {float(roll_ir.mean()):.3f}")
+            ax4.set_ylabel("Information Ratio"); ax4.set_xlabel("Date"); ax4.legend(); ax4.grid(True, alpha=0.3)
+            for ax in (ax1, ax2, ax3, ax4):
+                annotate_crisis_periods(ax, y_position="top")
+                ax.axvline(pd.to_datetime(OOS_START_DATE), color="gray", linestyle="--", alpha=0.7)
+            savefig_and_maybe_show(fig, ANALYSIS_OUT / f"B_rolling_statistics_rev26{suffix}.png", show=show_plots)
+    print("\n=== Viz C — Regime-Colored Monthly Scatter ===")
+    if ret_sg is None or benchmark is None or len(ret_sg) == 0 or len(benchmark) == 0:
+        print("Missing data for scatter; skipping.")
+        return
+    monthly_model = ret_sg.loc[burn_in_end_date:].resample("M").sum()
+    monthly_bench = benchmark.loc[burn_in_end_date:].resample("M").sum()
+    rolling_sharpe = benchmark.rolling(252).mean() / benchmark.rolling(252).std() * np.sqrt(252)
+    monthly_sharpe = rolling_sharpe.resample("M").last()
+    common_months = monthly_model.index.intersection(monthly_bench.index).intersection(monthly_sharpe.index)
+    if len(common_months) < 6:
+        print("Not enough monthly overlap; skipping.")
+        return
+    x, yv = monthly_bench.loc[common_months]*100, monthly_model.loc[common_months]*100
+    sharpe_vals = monthly_sharpe.loc[common_months]
+    regimes = sharpe_vals.apply(classify_regime)
+    rc = [REGIME_COLORS[r] for r in regimes]
+    slope, intercept, r_value, p_value, std_err = stats.linregress(x, yv)
+    fig, ax = plt.subplots(figsize=(12, 10))
+    ax.scatter(x, yv, alpha=0.7, s=80, c=rc, edgecolors="black", linewidth=0.5)
+    xl = np.linspace(x.min(), x.max(), 100); ax.plot(xl, slope*xl + intercept, color=COLOR_PALETTE["crisis"], lw=2, label=f"y = {slope:.2f}x + {intercept:.2f}\nR² = {r_value**2:.3f}")
+    ax.plot([x.min(), x.max()], [x.min(), x.max()], "k--", alpha=0.5, label="45°")
+    label_model = {"dual":"Model (Blended)","large_only":"Large Universe (Model)","small_only":"Small Universe (Model)"}.get(mode,"Model")
+    ax.set_xlabel(f"{BENCH_NAME} Monthly Return (%)"); ax.set_ylabel(f"{label_model} Monthly Return (%)")
+    ax.set_title(f"Monthly Scatter: {label_model} vs Benchmark (After {BURN_IN_MONTHS}-Month Burn-in)", fontsize=14, weight="bold")
+    ax.legend(loc="upper left"); ax.grid(True, alpha=0.3); ax.set_aspect("equal")
+    patches = [Patch(color=c, label=reg.replace("_"," ").title()) for reg, c in REGIME_COLORS.items()]
+    reg_leg = ax.legend(handles=patches, loc="lower right", title=f"{BENCH_NAME} Regime\n(Rolling Sharpe)", fontsize=8); ax.add_artist(reg_leg)
+    stats_text = f"Correlation: {r_value:.3f}\nTracking Error: {(yv-x).std():.1f}%\nMean Alpha: {(yv-x).mean():.1f}%"
+    ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, bbox=dict(boxstyle="round", facecolor="white", alpha=0.8), va="top", ha="left", fontsize=10)
+    savefig_and_maybe_show(fig, ANALYSIS_OUT / f"C_monthly_scatter_regime_rev26{suffix}.png", show=show_plots)
+
+def run_sg_cta_validation(X_large_full, X_small_full, y_full, mode: str = "large_only"):
+    BURN_IN_DAYS = 189
+    BURN_IN_MONTHS = 9
+    OOS_START_DATE = "2021-11-01"
+    TRAIN_VAL_END_DATE = pd.to_datetime(OOS_START_DATE).tz_localize('UTC') - pd.Timedelta(days=1)
+    custom_risk_config = RiskConfig(instrument_vol_target=0.12, portfolio_vol_target=0.12, max_leverage_cap=2.0, vol_halflife=40)
+    print(f"--- SG CTA Validation | Mode: {mode.upper()} ---")
+    print(f"Train/Validation ends: {TRAIN_VAL_END_DATE.date()} | OOS starts: {OOS_START_DATE}")
+    print(f"Burn-in: {BURN_IN_MONTHS} months ({BURN_IN_DAYS} trading days)")
+    print(f"Risk: inst_vol={custom_risk_config.instrument_vol_target:.1%}, port_vol={custom_risk_config.portfolio_vol_target:.1%}, cap={custom_risk_config.max_leverage_cap:.1f}, hl={custom_risk_config.vol_halflife}")
+    print("\n--- Calendar Alignment ---")
+    print(f"{BENCH_NAME} dates: {len(y_full.index)}")
+    if X_large_full is not None:
+        print(f"X_large dates: {len(X_large_full.index)}")
+        common_large = y_full.index.intersection(X_large_full.index)
+        print(f"Common (large): {len(common_large)} ({len(common_large) / len(y_full.index) * 100:.1f}%)")
+    if X_small_full is not None:
+        print(f"X_small dates: {len(X_small_full.index)}")
+        common_small = y_full.index.intersection(X_small_full.index)
+        print(f"Common (small): {len(common_small)} ({len(common_small) / len(y_full.index) * 100:.1f}%)")
+    ANALYSIS_OUT = RB_DIR
+    ANALYSIS_OUT.mkdir(parents=True, exist_ok=True)
+    suffix = mode_suffix(mode)
+    if mode == "large_only":
+        results_large = _build_single_universe(X_raw=X_large_full, y=y_full, lookbacks=(20,25,30,35,40), alpha_grid=None, l1_ratio=0.5, risk_config=custom_risk_config, ann_bdays=252, rng_seed=42, min_instruments=5, initial_training_window=756, min_history_pct=0.7, blend_win=756, oos_start_date=OOS_START_DATE, oos_coefficient_window=756, n_splits=5, training_window=756, min_val_window=20, allow_missing_instruments=False, persist_artifacts=True, universe_name="large", freeze_coefficients=False, alpha_ema=0.33, track_turnover=True)
+        pnl_large = results_large['combined']
+        benchmark = y_full.loc[pnl_large.index]
+        burn_in_end_date = pnl_large.index[BURN_IN_DAYS] if len(pnl_large) > BURN_IN_DAYS else pnl_large.index[-1]
+        quality = monitor_implementation_quality(results_large, y_full)
+        print("\n--- Implementation Quality (Large Only) ---")
+        print(quality)
+        metrics_oos = calculate_detailed_metrics(pnl_large.loc[OOS_START_DATE:], benchmark.loc[OOS_START_DATE:], "OOS", apply_burnin=False)
+        print("\n--- Large OOS Performance ---")
+        for k, v in metrics_oos.items():
+            if k != "Period": print(f"{k}: {v:.3f}")
+        create_sg_cta_visualizations(results_dual_sg=None, ret_sg=pnl_large, pnl_small=None, pnl_large=pnl_large, benchmark=benchmark, burn_in_end_date=burn_in_end_date, BURN_IN_DAYS=BURN_IN_DAYS, BURN_IN_MONTHS=BURN_IN_MONTHS, OOS_START_DATE=OOS_START_DATE, TRAIN_VAL_END_DATE=TRAIN_VAL_END_DATE, custom_risk_config=custom_risk_config, ANALYSIS_OUT=ANALYSIS_OUT, mode="large_only", show_plots=SHOW_PLOTS)
+        try:
+            run_extended_diagnostics(results=results_large, benchmark=benchmark, oos_start_date=OOS_START_DATE, analysis_out=ANALYSIS_OUT, color_palette=COLOR_PALETTE, regime_colors=REGIME_COLORS, annotate_crisis_periods_fn=annotate_crisis_periods, mode="large_only", include_persistence=False, include_alpha_stability=True, show_plots=SHOW_PLOTS)
+        except Exception as e:
+            print(f"Extended diagnostics failed: {e}")
+        quality.to_csv(ANALYSIS_OUT / f"implementation_quality_rev26{suffix}.csv")
+        pd.DataFrame([metrics_oos]).to_csv(ANALYSIS_OUT / f"oos_performance_rev26{suffix}.csv", index=False)
+        return results_large, pnl_large
+    if mode == "small_only":
+        results_small = _build_single_universe(X_raw=X_small_full, y=y_full, lookbacks=(20,25,30,35,40), alpha_grid=None, l1_ratio=0.5, risk_config=custom_risk_config, ann_bdays=252, rng_seed=42, min_instruments=5, initial_training_window=756, min_history_pct=0.7, blend_win=756, oos_start_date=OOS_START_DATE, oos_coefficient_window=756, n_splits=5, training_window=756, min_val_window=20, allow_missing_instruments=False, persist_artifacts=True, universe_name="small", freeze_coefficients=False, alpha_ema=0.33, track_turnover=True)
+        pnl_small = results_small['combined']
+        benchmark = y_full.loc[pnl_small.index]
+        burn_in_end_date = pnl_small.index[BURN_IN_DAYS] if len(pnl_small) > BURN_IN_DAYS else pnl_small.index[-1]
+        quality = monitor_implementation_quality(results_small, y_full)
+        print("\n--- Implementation Quality (Small Only) ---")
+        print(quality)
+        metrics_oos = calculate_detailed_metrics(pnl_small.loc[OOS_START_DATE:], benchmark.loc[OOS_START_DATE:], "OOS", apply_burnin=False)
+        print("\n--- Small OOS Performance ---")
+        for k, v in metrics_oos.items():
+            if k != "Period": print(f"{k}: {v:.3f}")
+        create_sg_cta_visualizations(results_dual_sg=None, ret_sg=pnl_small, pnl_small=pnl_small, pnl_large=None, benchmark=benchmark, burn_in_end_date=burn_in_end_date, BURN_IN_DAYS=BURN_IN_DAYS, BURN_IN_MONTHS=BURN_IN_MONTHS, OOS_START_DATE=OOS_START_DATE, TRAIN_VAL_END_DATE=TRAIN_VAL_END_DATE, custom_risk_config=custom_risk_config, ANALYSIS_OUT=ANALYSIS_OUT, mode="small_only", show_plots=SHOW_PLOTS)
+        try:
+            run_extended_diagnostics(results=results_small, benchmark=benchmark, oos_start_date=OOS_START_DATE, analysis_out=ANALYSIS_OUT, color_palette=COLOR_PALETTE, regime_colors=REGIME_COLORS, annotate_crisis_periods_fn=annotate_crisis_periods, mode="small_only", include_persistence=False, include_alpha_stability=True, show_plots=SHOW_PLOTS)
+        except Exception as e:
+            print(f"Extended diagnostics failed: {e}")
+        quality.to_csv(ANALYSIS_OUT / f"implementation_quality_rev26{suffix}.csv")
+        pd.DataFrame([metrics_oos]).to_csv(ANALYSIS_OUT / f"oos_performance_rev26{suffix}.csv", index=False)
+        return results_small, pnl_small
+    results_dual = build_replica_walk_forward_dual_universe(X_raw_small=X_small_full, X_raw_large=X_large_full, y=y_full, lookbacks=(20,25,30,35,40), alpha_grid=None, l1_ratio=0.5, risk_config=custom_risk_config, min_val_window=20, min_history_pct=0.7, allow_missing_instruments=False, oos_start_date=OOS_START_DATE, oos_coefficient_window=756, persist_artifacts=True, return_details=True, freeze_coefficients=False, alpha_ema=0.33, track_turnover=True, rebal_freq="Q")
+    ret_sg = results_dual['combined']
+    pnl_small = results_dual['small_results']['combined']
+    pnl_large = results_dual['large_results']['combined']
+    benchmark = y_full.loc[ret_sg.index]
+    burn_in_end_date = ret_sg.index[BURN_IN_DAYS] if len(ret_sg) > BURN_IN_DAYS else ret_sg.index[-1]
+    (results_dual['blend_weights'].to_frame('w_small').to_csv(ANALYSIS_OUT / "dynamic_blend_weights_rev26.csv"))
+    quality = monitor_implementation_quality(results_dual, y_full)
+    print("\n--- Implementation Quality (Dual) ---")
+    print(quality)
+    metrics_oos = calculate_detailed_metrics(ret_sg.loc[OOS_START_DATE:], benchmark.loc[OOS_START_DATE:], "OOS", apply_burnin=False)
+    print("\n--- OOS Performance (Blended) ---")
+    for k, v in metrics_oos.items():
+        if k != "Period": print(f"{k}: {v:.3f}")
+    create_sg_cta_visualizations(results_dual, ret_sg, pnl_small, pnl_large, benchmark, burn_in_end_date, BURN_IN_DAYS, BURN_IN_MONTHS, OOS_START_DATE, TRAIN_VAL_END_DATE, custom_risk_config, ANALYSIS_OUT, mode="dual", show_plots=SHOW_PLOTS)
+    try:
+        run_extended_diagnostics(results=results_dual, benchmark=benchmark, oos_start_date=OOS_START_DATE, analysis_out=ANALYSIS_OUT, color_palette=COLOR_PALETTE, regime_colors=REGIME_COLORS, annotate_crisis_periods_fn=annotate_crisis_periods, mode="dual", include_persistence=False, include_alpha_stability=True, show_plots=SHOW_PLOTS)
+    except Exception as e:
+        print(f"Extended diagnostics failed: {e}")
+    quality.to_csv(ANALYSIS_OUT / f"implementation_quality_rev26{mode_suffix('dual')}.csv")
+    pd.DataFrame([metrics_oos]).to_csv(ANALYSIS_OUT / f"oos_performance_rev26{mode_suffix('dual')}.csv", index=False)
+    return results_dual, ret_sg
+
+def create_exposure_visualizations(small_exp, large_exp, combined_fixed, all_asset_classes, exposure_dir: Path, mode: str = "dual", show_plots: bool = SHOW_PLOTS):
+    suffix = mode_suffix(mode)
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    ax1 = axes[0, 0]
+    x = np.arange(len(all_asset_classes)); width = 0.25
+    if small_exp is not None:
+        small_avg = small_exp.mean().reindex(all_asset_classes, fill_value=0)
+        ax1.bar(x - width, small_avg, width, label='Small', alpha=0.8, color=COLOR_PALETTE.get('small'))
+    if large_exp is not None:
+        large_avg = large_exp.mean().reindex(all_asset_classes, fill_value=0)
+        ax1.bar(x, large_avg, width, label='Large', alpha=0.8, color=COLOR_PALETTE.get('large'))
+    if combined_fixed is not None:
+        comb_avg = combined_fixed.mean().reindex(all_asset_classes, fill_value=0)
+        ax1.bar(x + width, comb_avg, width, label='Combined', alpha=0.8, color=COLOR_PALETTE.get('blended'))
+    ax1.set_xlabel('Asset Class'); ax1.set_ylabel('Average Exposure'); ax1.set_title('Average Exposures by Universe')
+    ax1.set_xticks(x); ax1.set_xticklabels(all_asset_classes, rotation=45); ax1.legend(); ax1.grid(True, alpha=0.3); ax1.axhline(0, color='black', linewidth=0.5)
+    ax2 = axes[0, 1]
+    if combined_fixed is not None:
+        for col in combined_fixed.columns:
+            if combined_fixed[col].abs().mean() > 0.001:
+                ax2.plot(combined_fixed.index, combined_fixed[col], label=col, alpha=0.8, linewidth=1.5)
+    ax2.set_title('Combined — Exposure Evolution'); ax2.set_xlabel('Date'); ax2.set_ylabel('Exposure')
+    ax2.legend(loc='center left', bbox_to_anchor=(1, 0.5)); ax2.grid(True, alpha=0.3); ax2.axhline(0, color='black', linewidth=0.5)
+    ax3 = axes[1, 0]
+    if combined_fixed is not None:
+        current_date = combined_fixed.index[-1]
+        current_combined = combined_fixed.iloc[-1]
+        if small_exp is not None:
+            current_small = small_exp.iloc[-1].reindex(all_asset_classes, fill_value=0)
+            ax3.bar(x - width, current_small, width, label='Small', alpha=0.8, color=COLOR_PALETTE.get('small'))
+        if large_exp is not None:
+            current_large = large_exp.iloc[-1].reindex(all_asset_classes, fill_value=0)
+            ax3.bar(x, current_large, width, label='Large', alpha=0.8, color=COLOR_PALETTE.get('large'))
+        ax3.bar(x + width, current_combined.reindex(all_asset_classes, fill_value=0), width, label='Combined', alpha=0.8, color=COLOR_PALETTE.get('blended'))
+        ax3.set_xlabel('Asset Class'); ax3.set_ylabel('Current Exposure'); ax3.set_title(f'Current Exposures ({current_date.date()})')
+        ax3.set_xticks(x); ax3.set_xticklabels(all_asset_classes, rotation=45); ax3.legend(); ax3.grid(True, alpha=0.3); ax3.axhline(0, color='black', linewidth=0.5)
+    ax4 = axes[1, 1]; ax4.axis('off')
+    if combined_fixed is not None:
+        summary = f"EXPOSURE SUMMARY\n\nCombined Strategy:\n• Observations: {len(combined_fixed):,}\n• Range: {combined_fixed.index[0].date()} → {combined_fixed.index[-1].date()}\n• Active classes: {int((combined_fixed.mean().abs() > 0.001).sum())}\n\nCurrent Allocation:"
+        for ac in all_asset_classes:
+            if ac in combined_fixed.columns:
+                v = float(combined_fixed.iloc[-1][ac])
+                if abs(v) > 0.001:
+                    summary += f"\n• {ac}: {v:+.1%}"
+        summary += "\n\nKey: dynamic universe blend; risk-managed exposures"
+        ax4.text(0.1, 0.9, summary, transform=ax4.transAxes, fontsize=11, va='top', fontfamily='monospace', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    savefig_and_maybe_show(fig, exposure_dir / f"asset_exposures_summary_rev26{suffix}.png", show=show_plots)
+    if combined_fixed is not None:
+        fig, ax = plt.subplots(figsize=(12, 6))
+        monthly = combined_fixed.resample('M').mean()
+        active_classes = [c for c in monthly.columns if monthly[c].abs().mean() > 0.001]
+        monthly = monthly[active_classes]
+        im = ax.imshow(monthly.T, aspect='auto', cmap='RdBu_r', vmin=-0.4, vmax=0.4, interpolation='nearest')
+        ax.set_yticks(range(len(active_classes))); ax.set_yticklabels(active_classes)
+        n = len(monthly); step = max(1, n // 15); idxs = range(0, n, step)
+        ax.set_xticks(list(idxs)); ax.set_xticklabels([monthly.index[i].strftime('%Y-%m') for i in idxs], rotation=45, ha='right')
+        ax.set_title('Combined — Monthly Avg Exposures Heatmap', fontsize=12, weight='bold')
+        ax.set_xlabel('Date'); ax.set_ylabel('Asset Class')
+        cb = plt.colorbar(im, ax=ax, label='Avg Monthly Exposure')
+        savefig_and_maybe_show(fig, exposure_dir / f"asset_exposures_heatmap_fixed_rev26{suffix}.png", show=show_plots)
+
+def analyze_exposures(results_dual_sg, X_large_full, X_small_full, ret_sg, mode: str = "dual", out_dir: Path | None = None):
+    exposure_dir = out_dir if out_dir is not None else (RB_DIR / "asset_class_exposures")
+    exposure_dir.mkdir(parents=True, exist_ok=True)
+    all_instruments = set(X_large_full.columns) if X_large_full is not None else set()
+    if X_small_full is not None:
+        all_instruments |= set(X_small_full.columns)
+    cfg_path = BASE_DIR / "cfg" / "instrumentconfig.csv"
+    if cfg_path.exists():
+        inst_config = pd.read_csv(cfg_path).set_index('Instrument')
+        if 'AssetClass' in inst_config:
+            inst_config = inst_config[inst_config['AssetClass'].str.upper() != 'AGS']
+    else:
+        def guess_asset_class(instrument):
+            inst_upper = str(instrument).upper()
+            direct = {'CRUDE_W':'Energy','SP500':'Equity','S&P500':'Equity','TOPIX':'Equity','US5':'Bond','US5Y':'Bond','US10':'Bond','US10Y':'Bond','US2':'Bond','US2Y':'Bond'}
+            if inst_upper in direct: return direct[inst_upper]
+            if any(x in inst_upper for x in ['CRUDE','OIL','BRENT','WTI','CL','NG','GASOIL','HO','RB']): return 'Energy'
+            if any(x in inst_upper for x in ['CORN','WHEAT','SOYBEAN','SUGAR','COFFEE','COCOA','COTTON']): return 'Ags'
+            if any(x in inst_upper for x in ['GOLD','SILVER','COPPER','ALUMINUM','PLATINUM','PALLADIUM']): return 'Metals'
+            if any(x in inst_upper for x in ['CATTLE','HOGS','LC','LH','FC']): return 'Livestock'
+            if any(x in inst_upper for x in ['EUR','GBP','JPY','CHF','AUD','CAD','NZD']) and len(inst_upper) <= 6 and not any(x in inst_upper for x in ['BOND','RATE']): return 'FX'
+            if inst_upper.startswith('US') and any(char.isdigit() for char in inst_upper): return 'Bond'
+            if any(x in inst_upper for x in ['BOBL','BUND','BOND','RATE']): return 'Bond'
+            if any(x in inst_upper for x in ['ES','NQ','NASDAQ','DOW','FTSE','DAX','EUROSTOXX']): return 'Equity'
+            return 'Other'
+        inst_config = pd.DataFrame({'AssetClass': {inst: guess_asset_class(inst) for inst in all_instruments}})
+        if 'AssetClass' in inst_config:
+            inst_config = inst_config[inst_config['AssetClass'].str.upper() != 'AGS']
+    weight_files_small = list(WEIGHT_HISTORY_DIR.glob("weights_small_w*.parquet")) if X_small_full is not None else []
+    weight_files_large = list(WEIGHT_HISTORY_DIR.glob("weights_large_w*.parquet"))
+    small_exp = None; large_exp = None
+    if not weight_files_small and not weight_files_large:
+        print("No weight history — creating simple equal-weight exposures by asset class")
+        dates = ret_sg.index
+        if X_small_full is not None:
+            small_instruments = _non_ag_cols(list(X_small_full.columns))
+            small_asset_classes = [(inst_config.loc[i, 'AssetClass'] if i in inst_config.index else 'Other') for i in small_instruments]
+            unique_small_ac = sorted(set(small_asset_classes))
+            small_exp = pd.DataFrame(0.0, index=dates, columns=unique_small_ac)
+            for i, inst in enumerate(small_instruments):
+                ac = small_asset_classes[i]; small_exp[ac] += 1.0 / len(small_instruments)
+        if X_large_full is not None:
+            large_instruments = _non_ag_cols(list(X_large_full.columns))
+            large_asset_classes = [(inst_config.loc[i, 'AssetClass'] if i in inst_config.index else 'Other') for i in large_instruments]
+            unique_large_ac = sorted(set(large_asset_classes))
+            large_exp = pd.DataFrame(0.0, index=dates, columns=unique_large_ac)
+            for i, inst in enumerate(large_instruments):
+                ac = large_asset_classes[i]; large_exp[ac] += 1.0 / len(large_instruments)
+    else:
+        print("Loading weight history for exposures")
+        if weight_files_small:
+            small_weights = []
+            for w in [20,25,30,35,40]:
+                wf = WEIGHT_HISTORY_DIR / f"weights_small_w{w}.parquet"
+                if wf.exists(): small_weights.append(pd.read_parquet(wf))
+            if small_weights:
+                small_avg = sum(small_weights) / len(small_weights)
+                small_avg = small_avg[_non_ag_cols(list(small_avg.columns))]
+                amap = {inst: (inst_config.loc[inst, 'AssetClass'] if inst in inst_config.index else 'Other') for inst in small_avg.columns}
+                us = sorted(set(amap.values()))
+                small_exp = pd.DataFrame(0.0, index=small_avg.index, columns=us)
+                for inst, ac in amap.items():
+                    if inst in small_avg.columns:
+                        small_exp[ac] += small_avg[inst]
+        if weight_files_large:
+            large_weights = []
+            for w in [20,25,30,35,40]:
+                wf = WEIGHT_HISTORY_DIR / f"weights_large_w{w}.parquet"
+                if wf.exists(): large_weights.append(pd.read_parquet(wf))
+            if large_weights:
+                large_avg = sum(large_weights) / len(large_weights)
+                large_avg = large_avg[_non_ag_cols(list(large_avg.columns))]
+                amap = {inst: (inst_config.loc[inst, 'AssetClass'] if inst in inst_config.index else 'Other') for inst in large_avg.columns}
+                us = sorted(set(amap.values()))
+                large_exp = pd.DataFrame(0.0, index=large_avg.index, columns=us)
+                for inst, ac in amap.items():
+                    if inst in large_avg.columns:
+                        large_exp[ac] += large_avg[inst]
+    if small_exp is not None:
+        small_exp.to_parquet(exposure_dir / "exposure_small_assetclass_rev26.parquet", compression='gzip')
+    if large_exp is not None:
+        large_exp.to_parquet(exposure_dir / "exposure_large_assetclass_rev26.parquet", compression='gzip')
+    if small_exp is not None and large_exp is not None:
+        all_ac = sorted(set(small_exp.columns) | set(large_exp.columns))
+    elif small_exp is not None:
+        all_ac = list(small_exp.columns)
+    elif large_exp is not None:
+        all_ac = list(large_exp.columns)
+    else:
+        print("No exposures computed — skipping charts"); return
+    blend_path = RB_DIR / "dynamic_blend_weights_rev26.csv"
+    if blend_path.exists() and (small_exp is not None and large_exp is not None):
+        blend = pd.read_csv(blend_path, index_col=0, parse_dates=True).squeeze("columns")
+    else:
+        blend = pd.Series(0.5, index=ret_sg.index) if (small_exp is not None and large_exp is not None) else None
+    if blend is not None and small_exp is not None and large_exp is not None:
+        small_al = small_exp.reindex(columns=all_ac, fill_value=0)
+        large_al = large_exp.reindex(columns=all_ac, fill_value=0)
+        common_dates = small_al.index.intersection(large_al.index).intersection(blend.index)
+        combined_fixed = pd.DataFrame(index=common_dates, columns=all_ac, dtype=float)
+        for dt in common_dates:
+            ws = float(blend.loc[dt]); wl = 1.0 - ws
+            combined_fixed.loc[dt] = small_al.loc[dt]*ws + large_al.loc[dt]*wl
+    else:
+        combined_fixed = large_exp if large_exp is not None else small_exp
+    if combined_fixed is not None:
+        combined_fixed.to_parquet(exposure_dir / "exposure_combined_assetclass_FIXED_rev26.parquet", compression='gzip')
+        create_exposure_visualizations(small_exp, large_exp, combined_fixed, all_ac, exposure_dir, mode=mode, show_plots=SHOW_PLOTS)
+    print("\nExposure analysis complete.")
+    print("Files saved to:", exposure_dir)
+
+def _rb_rename_shim():
+    rename_map = {"implementation_quality_large_only_rev26.csv": "implementation_quality_rev26_large_only.csv", "implementation_quality_small_only_rev26.csv": "implementation_quality_rev26_small_only.csv", "implementation_quality_rev26.csv": "implementation_quality_rev26_dual.csv", "J_monthly_scatter_regime_rev26.png": None}
+    for old, new in rename_map.items():
+        p_old = RB_DIR / old
+        if p_old.exists():
+            if new is None:
+                try: p_old.unlink(missing_ok=True)
+                except TypeError: p_old.unlink()
+            else:
+                p_new = RB_DIR / new
+                if not p_new.exists():
+                    p_old.rename(p_new)
+
+def run():
+    logger.info("Starting SG CTA Analysis Pipeline")
+    try:
+        logger.info("Step 1: SG CTA data…")
+        y_excess = process_sg_cta_data()
+        logger.info("Step 2: Futures data…")
+        process_futures_data()
+        logger.info("Step 3: Panel build…")
+        X_panel, M_mask = build_panel()
+        logger.info("Step 4: Large universe…")
+        X_large = create_large_universe()
+        logger.info("Step 5: Small universe…")
+        X_small = create_small_universe()
+        logger.info("Step 6: Instrument configuration…")
+        create_instrument_config()
+        logger.info("Step 7: Load full data for validation…")
+        X_large_full = pd.read_parquet(Path(config.PANEL_OUTPUT_DIR) / "X_large_universe/X_large_universe.parquet").astype("float32")
+        X_small_full = pd.read_parquet(Path(config.PANEL_OUTPUT_DIR) / "X_small_universe/X_small_universe.parquet").astype("float32")
+        y_full = pd.read_pickle(Path(config.SG_TREND_INPUT_DIR) / f"y_excess_{BENCH_SLUG}.pkl").astype("float32")
+        logger.info("Step 8: Validation (large-only by default)…")
+        results_out, ret_out = run_sg_cta_validation(X_large_full, X_small_full, y_full, mode="large_only")
+        logger.info("Step 9: Exposures…")
+        analyze_exposures(results_out, X_large_full, None, ret_out, mode="large_only", out_dir=(RB_DIR / "asset_class_exposures"))
+        _rb_rename_shim()
+        logger.info("Pipeline complete.")
+        logger.info(f"Results → {config.SG_TREND_OUTPUT_DIR}")
+        logger.info(f"Figures (base) → {VIZ_DIR}")
+        logger.info(f"RB Results & Plots → {RB_DIR}")
+        print("\n" + "="*72)
+        print("PIPELINE SUMMARY")
+        print("="*72)
+        print("Data processed: 2000-01-03 → 2024-03-29")
+        print(f"Small universe: {len(X_small_full.columns)} instruments")
+        print(f"Large universe: {len(X_large_full.columns)} instruments")
+        print("OOS period: 2021-11-01 onwards")
+        print("\nKey Results:")
+        print(f"- Large Universe Sharpe: {float(results_out['combined'].mean() / results_out['combined'].std() * np.sqrt(252)):.3f}")
+        print(f"- Rebalancing: {results_out.get('rebal_freq', 'N/A')}")
+        print(f"- Volatility Target: {results_out.get('risk_config', DEFAULT_RISK_CONFIG).portfolio_vol_target:.0%}")
+        if SHOW_PLOTS:
+            print("\nShowing all figures. Close the windows to end the run...")
+            plt.show()
+    except FileNotFoundError as e:
+        logger.error(f"Required file not found: {e}")
+        logger.error("Ensure the following paths exist with data:")
+        logger.error("  • data/Top-Down Update/SG CTA Indexes Correct.xlsx")
+        logger.error("  • data/Top-Down Update/US3MT=RR.xlsx")
+        logger.error("  • data/futures/multiple_prices_csv/")
+        logger.error("  • data/futures/roll_calendars_csv/")
+        logger.error("  • data/futures/csvconfig/")
+        raise
+    except Exception as e:
+        logger.error(f"Error in SG CTA analysis: {e}")
+        logger.error("Full traceback:", exc_info=True)
+        raise
+
+if __name__ == "__main__":
+    run()
+
+__all__ = ['run','process_sg_cta_data','process_futures_data','build_panel','create_large_universe','create_small_universe','create_instrument_config','build_replica_walk_forward_dual_universe','run_sg_cta_validation','analyze_exposures','monitor_implementation_quality','analyze_persistence_usage','RiskConfig','DEFAULT_RISK_CONFIG','run_extended_diagnostics','compute_drawdown_attribution']
