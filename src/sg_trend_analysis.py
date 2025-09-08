@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import os
 import gzip
 import pickle
@@ -9,7 +8,6 @@ from dataclasses import dataclass
 from collections import defaultdict
 from pathlib import Path
 from datetime import datetime
-
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -24,39 +22,26 @@ import matplotlib.dates as mdates
 from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.patches import Rectangle, Patch
 from matplotlib.ticker import PercentFormatter
-
 from . import config
 
-logging.basicConfig(
-    level=os.getenv("LOGLEVEL", "INFO"),
-    format="%(asctime)s | %(levelname)-7s | %(message)s",
-)
+logging.basicConfig(level=os.getenv("LOGLEVEL", "INFO"), format="%(asctime)s | %(levelname)-7s | %(message)s")
 logger = logging.getLogger("sg_trend")
-
 warnings.filterwarnings("ignore")
 plt.style.use('seaborn-v0_8-whitegrid')
-plt.rcParams.update({
-    'figure.dpi': 100, 'savefig.dpi': 300,
-    'font.size': 10, 'font.family': 'serif',
-    'axes.labelsize': 11, 'axes.titlesize': 12,
-    'legend.fontsize': 9, 'xtick.labelsize': 9, 'ytick.labelsize': 9,
-    'axes.grid': True, 'grid.alpha': 0.30, 'lines.linewidth': 1.5,
-    'figure.facecolor': 'white', 'axes.facecolor': 'white'
-})
+plt.rcParams.update({'figure.dpi': 100, 'savefig.dpi': 300, 'font.size': 10, 'font.family': 'serif', 'axes.labelsize': 11, 'axes.titlesize': 12, 'legend.fontsize': 9, 'xtick.labelsize': 9, 'ytick.labelsize': 9, 'axes.grid': True, 'grid.alpha': 0.30, 'lines.linewidth': 1.5, 'figure.facecolor': 'white', 'axes.facecolor': 'white'})
 
 BASE_DIR = Path(config.DATA_DIR)
-AUDIT_DIR = BASE_DIR / "audit_trail"; AUDIT_DIR.mkdir(exist_ok=True)
-ARCHIVE_DIR = BASE_DIR / "audit_archive"; ARCHIVE_DIR.mkdir(exist_ok=True)
-
+AUDIT_DIR = BASE_DIR / "audit_trail"
+AUDIT_DIR.mkdir(exist_ok=True)
+ARCHIVE_DIR = BASE_DIR / "audit_archive"
+ARCHIVE_DIR.mkdir(exist_ok=True)
 VIZ_DIR = Path(config.FIGURES_DIR) / "sg_trend_visualizations"
 VIZ_DIR.mkdir(exist_ok=True)
 RB_DIR = VIZ_DIR / "returns_based_results"
 RB_DIR.mkdir(exist_ok=True)
-
-WEIGHT_HISTORY_DIR = BASE_DIR / "weight_history"; WEIGHT_HISTORY_DIR.mkdir(exist_ok=True)
-
+WEIGHT_HISTORY_DIR = BASE_DIR / "weight_history"
+WEIGHT_HISTORY_DIR.mkdir(exist_ok=True)
 SHOW_PLOTS = os.getenv("SHOW_PLOTS", "1").strip() not in {"0", "false", "False", ""}
-
 N_JOBS = int(os.getenv("N_JOBS", min(4, os.cpu_count() or 1)))
 
 try:
@@ -89,41 +74,18 @@ def savefig_and_maybe_show(fig, outpath: Path, *, show: bool = SHOW_PLOTS, dpi: 
         plt.close(fig)
     return outpath
 
-_DEFAULT_COLORS = {
-    'small': '#1f77b4',
-    'large': '#2ca02c',
-    'blended': '#d62728',
-    'benchmark': '#9467bd',
-    'normal': '#2c3e50',
-    'crisis': '#e74c3c',
-}
+_DEFAULT_COLORS = {'small': '#1f77b4', 'large': '#2ca02c', 'blended': '#d62728', 'benchmark': '#9467bd', 'normal': '#2c3e50', 'crisis': '#e74c3c'}
+
 try:
     COLOR_PALETTE = {**_DEFAULT_COLORS, **dict(config.SG_TREND_COLORS)}
 except Exception:
     COLOR_PALETTE = dict(_DEFAULT_COLORS)
 
-AGS_DROP = {
-    "CORN","SOYBEANS","WHEAT","SUGAR","COFFEE","COCOA","COTTON",
-    "ZC","ZS","ZW","C","S","W","SB","KC","CC","CT","KW","CORN_MINI","WHEAT_MINI"
-}
+AGS_DROP = {"CORN","SOYBEANS","WHEAT","SUGAR","COFFEE","COCOA","COTTON","ZC","ZS","ZW","C","S","W","SB","KC","CC","CT","KW","CORN_MINI","WHEAT_MINI"}
 
-REGIME_COLORS = {
-    'strong_bear': '#8b0000',
-    'bear': '#dc143c',
-    'weak_bear': '#ff6347',
-    'neutral': '#ffd700',
-    'weak_bull': '#90ee90',
-    'bull': '#32cd32',
-    'strong_bull': '#006400'
-}
+REGIME_COLORS = {'strong_bear': '#8b0000','bear': '#dc143c','weak_bear': '#ff6347','neutral': '#ffd700','weak_bull': '#90ee90','bull': '#32cd32','strong_bull': '#006400'}
 
-CRISIS_PERIODS = [
-    ('2007-07-01', '2009-03-31', 'GFC'),
-    ('2011-05-01', '2011-10-31', 'EU Debt'),
-    ('2015-08-01', '2016-02-29', 'China/Oil'),
-    ('2020-02-15', '2020-04-30', 'COVID-19'),
-    ('2022-02-15', '2022-10-31', 'Ukraine/Inflation'),
-]
+CRISIS_PERIODS = [('2007-07-01', '2009-03-31', 'GFC'),('2011-05-01', '2011-10-31', 'EU Debt'),('2015-08-01', '2016-02-29', 'China/Oil'),('2020-02-15', '2020-04-30', 'COVID-19'),('2022-02-15', '2022-10-31', 'Ukraine/Inflation')]
 
 VERSION = "i"
 
@@ -158,8 +120,7 @@ def load_rf(cache: Path | None = None, src: Path | None = None, first_date: str 
             out.index = out.index.tz_localize("UTC")
         return out
     DAY_COUNT = 360
-    tb = (pd.read_excel(src, sheet_name="Table Data", parse_dates=["Date"])
-          .rename(columns={"US3MT=RR (BID_YIELD)": "y"}).dropna(subset=["Date"]))
+    tb = (pd.read_excel(src, sheet_name="Table Data", parse_dates=["Date"]).rename(columns={"US3MT=RR (BID_YIELD)": "y"}).dropna(subset=["Date"]))
     tb["y"] = pd.to_numeric(tb["y"], errors="coerce") / 100 / DAY_COUNT
     tb = (tb.set_index("Date").sort_index()[["y"]])
     tb.index = to_utc(tb.index)
@@ -169,15 +130,7 @@ def load_rf(cache: Path | None = None, src: Path | None = None, first_date: str 
     tb.to_parquet(cache, compression="snappy")
     return tb["rf_daily"]
 
-def rescale_to_target(
-    ret: pd.Series,
-    *,
-    half_life: int | None = None,
-    ann_bdays: int = 252,
-    target: float | None = None,
-    scale_cap: float | None = None,
-    risk_config: RiskConfig | None = None
-) -> pd.Series:
+def rescale_to_target(ret: pd.Series, *, half_life: int | None = None, ann_bdays: int = 252, target: float | None = None, scale_cap: float | None = None, risk_config: RiskConfig | None = None) -> pd.Series:
     if risk_config is None:
         risk_config = DEFAULT_RISK_CONFIG
     if half_life is None:
@@ -205,12 +158,18 @@ def trailing_vol(series: pd.Series, lookback: int = 252) -> float:
     return float(series.rolling(lookback).std().iloc[-1] * np.sqrt(252))
 
 def classify_regime(rolling_sharpe: float) -> str:
-    if rolling_sharpe < -2:   return 'strong_bear'
-    if rolling_sharpe < -1:   return 'bear'
-    if rolling_sharpe < -0.5: return 'weak_bear'
-    if rolling_sharpe < 0.5:  return 'neutral'
-    if rolling_sharpe < 1:    return 'weak_bull'
-    if rolling_sharpe < 2:    return 'bull'
+    if rolling_sharpe < -2:
+        return 'strong_bear'
+    if rolling_sharpe < -1:
+        return 'bear'
+    if rolling_sharpe < -0.5:
+        return 'weak_bear'
+    if rolling_sharpe < 0.5:
+        return 'neutral'
+    if rolling_sharpe < 1:
+        return 'weak_bull'
+    if rolling_sharpe < 2:
+        return 'bull'
     return 'strong_bull'
 
 def annotate_crisis_periods(ax, y_position: str = 'top'):
@@ -224,12 +183,12 @@ def annotate_crisis_periods(ax, y_position: str = 'top'):
         ax.axvspan(sdt, edt, alpha=0.15, color=COLOR_PALETTE['crisis'], zorder=0)
         y_pos = ax.get_ylim()[1] * 0.95 if y_position == 'top' else ax.get_ylim()[0] * 1.05
         mid = sdt + (edt - sdt) / 2
-        ax.text(mid, y_pos, label, ha='center', va='center', fontsize=8,
-                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7))
+        ax.text(mid, y_pos, label, ha='center', va='center', fontsize=8, bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7))
 
 def create_performance_table(metrics_dict: dict, title: str = "Performance Metrics"):
     fig, ax = plt.subplots(figsize=(10, max(4, len(metrics_dict) * 0.4)))
-    ax.axis('tight'); ax.axis('off')
+    ax.axis('tight')
+    ax.axis('off')
     df = pd.DataFrame(list(metrics_dict.items()), columns=['Metric', 'Value'])
     formatted = []
     for _, row in df.iterrows():
@@ -245,9 +204,12 @@ def create_performance_table(metrics_dict: dict, title: str = "Performance Metri
             formatted.append(str(v))
     df['Value'] = formatted
     table = ax.table(cellText=df.values, colLabels=df.columns, cellLoc='left', loc='center')
-    table.auto_set_font_size(False); table.set_fontsize(10); table.scale(1.2, 1.5)
+    table.auto_set_font_size(False)
+    table.set_fontsize(10)
+    table.scale(1.2, 1.5)
     for i in range(len(df.columns)):
-        table[(0, i)].set_facecolor('#34495e'); table[(0, i)].set_text_props(weight='bold', color='white')
+        table[(0, i)].set_facecolor('#34495e')
+        table[(0, i)].set_text_props(weight='bold', color='white')
     for i in range(1, len(df) + 1):
         if i % 2 == 0:
             for j in range(len(df.columns)):
@@ -258,19 +220,7 @@ def create_performance_table(metrics_dict: dict, title: str = "Performance Metri
 def mode_suffix(mode: str) -> str:
     return "" if mode == "dual" else f"_{mode}"
 
-def tune_alphas_kfold_cv(
-    X_train: pd.DataFrame,
-    y_train: pd.Series,
-    lookback: int,
-    alpha_grid=None,
-    l1_ratio: float = 0.5,
-    n_splits: int = 5,
-    rng_seed: int = 42,
-    min_instruments: int = 5,
-    min_val_window: int = 20,
-    warm_start_alpha: float | None = None,
-    training_window: int = 756
-) -> float:
+def tune_alphas_kfold_cv(X_train: pd.DataFrame, y_train: pd.Series, lookback: int, alpha_grid=None, l1_ratio: float = 0.5, n_splits: int = 5, rng_seed: int = 42, min_instruments: int = 5, min_val_window: int = 20, warm_start_alpha: float | None = None, training_window: int = 756) -> float:
     if lookback > training_window:
         logger.warning(f"Lookback {lookback} > training_window {training_window} — continuing with guard rails")
     common_idx = X_train.index.intersection(y_train.index)
@@ -308,10 +258,7 @@ def tune_alphas_kfold_cv(
                 active = X_fit.columns[X_fit.notna().sum() > 0]
                 if len(active) < min_instruments:
                     continue
-                model = ElasticNet(
-                    l1_ratio=l1_ratio, alpha=float(alpha), fit_intercept=False,
-                    max_iter=10000, random_state=rng_seed
-                )
+                model = ElasticNet(l1_ratio=l1_ratio, alpha=float(alpha), fit_intercept=False, max_iter=10000, random_state=rng_seed)
                 model.fit(X_fit[active].fillna(0.0).values, y_fit.values)
                 coef = pd.Series(0.0, index=X.columns)
                 coef[active] = model.coef_
@@ -327,22 +274,7 @@ def tune_alphas_kfold_cv(
                 best_avg_sharpe, best_alpha = avg_s, float(alpha)
     return float(best_alpha)
 
-def tune_alphas_quarterly(
-    X_full: pd.DataFrame,
-    y_full: pd.Series,
-    current_date: pd.Timestamp,
-    lookbacks=(20, 25, 30, 35, 40),
-    alpha_grid=None,
-    l1_ratio: float = 0.5,
-    n_splits: int = 5,
-    training_window: int = 756,
-    rng_seed: int = 42,
-    min_instruments: int = 5,
-    min_val_window: int = 20,
-    previous_alphas: dict | None = None,
-    persist_to_disk: bool = True,
-    universe_name: str = ""
-) -> dict:
+def tune_alphas_quarterly(X_full: pd.DataFrame, y_full: pd.Series, current_date: pd.Timestamp, lookbacks=(20, 25, 30, 35, 40), alpha_grid=None, l1_ratio: float = 0.5, n_splits: int = 5, training_window: int = 756, rng_seed: int = 42, min_instruments: int = 5, min_val_window: int = 20, previous_alphas: dict | None = None, persist_to_disk: bool = True, universe_name: str = "") -> dict:
     mask = X_full.index <= current_date
     X_av, y_av = X_full.loc[mask], y_full.loc[mask]
     X_train = X_av.iloc[-training_window:]
@@ -351,60 +283,24 @@ def tune_alphas_quarterly(
     use_parallel = JOBLIB_AVAILABLE and len(lookbacks) > 1 and N_JOBS > 1
     if use_parallel:
         logger.info(f"Parallel alpha tuning for {len(lookbacks)} windows with {N_JOBS} jobs")
-        results = Parallel(n_jobs=N_JOBS, prefer="threads")(
-            delayed(tune_alphas_kfold_cv)(
-                X_train, y_train, w, None, l1_ratio, n_splits, rng_seed + w,
-                min_instruments, min_val_window, previous_alphas.get(w) if previous_alphas else None, training_window
-            )
-            for w in lookbacks
-        )
+        results = Parallel(n_jobs=N_JOBS, prefer="threads")(delayed(tune_alphas_kfold_cv)(X_train, y_train, w, None, l1_ratio, n_splits, rng_seed + w, min_instruments, min_val_window, previous_alphas.get(w) if previous_alphas else None, training_window) for w in lookbacks)
         alpha_star = dict(zip(lookbacks, results))
     else:
         alpha_star = {}
         for w in lookbacks:
             warm = previous_alphas.get(w) if previous_alphas else None
-            a = tune_alphas_kfold_cv(
-                X_train, y_train, w, None, l1_ratio, n_splits, rng_seed + w,
-                min_instruments, min_val_window, warm, training_window
-            )
+            a = tune_alphas_kfold_cv(X_train, y_train, w, None, l1_ratio, n_splits, rng_seed + w, min_instruments, min_val_window, warm, training_window)
             alpha_star[w] = float(a)
             logger.info(f"  w={w:<2d} → α*={alpha_star[w]:.2e}" + (f" (warm-start {warm:.2e})" if warm else ""))
     if persist_to_disk:
         quarter = f"{current_date.year}Q{(current_date.month - 1)//3 + 1}"
         fn = AUDIT_DIR / f"alphas_{universe_name}_{quarter}_{current_date.strftime('%Y%m%d')}.pkl.gz"
         with gzip.open(fn, "wb") as f:
-            pickle.dump({
-                'date': current_date, 'alphas': alpha_star, 'lookbacks': lookbacks,
-                'training_window': training_window, 'universe': universe_name, 'rev': VERSION
-            }, f)
+            pickle.dump({'date': current_date, 'alphas': alpha_star, 'lookbacks': lookbacks, 'training_window': training_window, 'universe': universe_name, 'rev': VERSION}, f)
         logger.info(f"Saved compressed alphas → {fn}")
     return alpha_star
 
-def _build_single_universe(
-    X_raw: pd.DataFrame,
-    y: pd.Series,
-    lookbacks,
-    alpha_grid,
-    l1_ratio,
-    risk_config,
-    ann_bdays,
-    rng_seed,
-    min_instruments,
-    initial_training_window,
-    min_history_pct,
-    blend_win,
-    oos_start_date,
-    oos_coefficient_window,
-    n_splits,
-    training_window,
-    min_val_window,
-    allow_missing_instruments,
-    persist_artifacts,
-    universe_name: str = "",
-    freeze_coefficients: bool = False,
-    alpha_ema: float = 0.33,
-    track_turnover: bool = True
-) -> dict:
+def _build_single_universe(X_raw: pd.DataFrame, y: pd.Series, lookbacks, alpha_grid, l1_ratio, risk_config, ann_bdays, rng_seed, min_instruments, initial_training_window, min_history_pct, blend_win, oos_start_date, oos_coefficient_window, n_splits, training_window, min_val_window, allow_missing_instruments, persist_artifacts, universe_name: str = "", freeze_coefficients: bool = False, alpha_ema: float = 0.33, track_turnover: bool = True) -> dict:
     alpha_star = {w: 1e-3 for w in lookbacks}
     X_scaled = pd.DataFrame(index=X_raw.index, columns=X_raw.columns, dtype="float64")
     for col in X_raw.columns:
@@ -421,24 +317,14 @@ def _build_single_universe(
     previous_alphas = None
     alpha_stability_metrics = {w: {'alphas': [], 'dates': []} for w in lookbacks}
     for qe in tqdm(quarter_ends, desc=f"Tuning ({universe_name})"):
-        alpha_history[qe] = tune_alphas_quarterly(
-            X_full=X, y_full=y, current_date=qe, lookbacks=lookbacks, alpha_grid=alpha_grid,
-            l1_ratio=l1_ratio, n_splits=n_splits, training_window=training_window, rng_seed=rng_seed,
-            min_instruments=min_instruments, min_val_window=min_val_window,
-            previous_alphas=previous_alphas, persist_to_disk=persist_artifacts, universe_name=universe_name
-        )
+        alpha_history[qe] = tune_alphas_quarterly(X_full=X, y_full=y, current_date=qe, lookbacks=lookbacks, alpha_grid=alpha_grid, l1_ratio=l1_ratio, n_splits=n_splits, training_window=training_window, rng_seed=rng_seed, min_instruments=min_instruments, min_val_window=min_val_window, previous_alphas=previous_alphas, persist_to_disk=persist_artifacts, universe_name=universe_name)
         previous_alphas = alpha_history[qe]
         for w in lookbacks:
             if w in alpha_history[qe]:
                 alpha_stability_metrics[w]['alphas'].append(alpha_history[qe][w])
                 alpha_stability_metrics[w]['dates'].append(qe)
     if first_tune_date not in alpha_history:
-        alpha_history[first_tune_date] = tune_alphas_quarterly(
-            X_full=X, y_full=y, current_date=first_tune_date, lookbacks=lookbacks, alpha_grid=alpha_grid,
-            l1_ratio=l1_ratio, n_splits=n_splits, training_window=training_window, rng_seed=rng_seed,
-            min_instruments=min_instruments, min_val_window=min_val_window,
-            previous_alphas=None, persist_to_disk=persist_artifacts, universe_name=universe_name
-        )
+        alpha_history[first_tune_date] = tune_alphas_quarterly(X_full=X, y_full=y, current_date=first_tune_date, lookbacks=lookbacks, alpha_grid=alpha_grid, l1_ratio=l1_ratio, n_splits=n_splits, training_window=training_window, rng_seed=rng_seed, min_instruments=min_instruments, min_val_window=min_val_window, previous_alphas=None, persist_to_disk=persist_artifacts, universe_name=universe_name)
     predictions_per_model = pd.DataFrame(index=X.index, columns=lookbacks, dtype="float64")
     initial_burn_in = max(lookbacks) + 2
     last_valid_coeffs = {w: pd.Series(0.0, index=X.columns, dtype="float64") for w in lookbacks}
@@ -461,19 +347,17 @@ def _build_single_universe(
                 active = X_fit.columns[X_fit.notna().sum() >= 1]
             else:
                 active = X_fit.columns[X_fit.notna().sum() >= int(win * min_history_pct * 0.5)]
-            model = ElasticNet(
-                l1_ratio=l1_ratio, alpha=float(final_alphas.get(w, 1e-3)),
-                fit_intercept=False, max_iter=10000, random_state=rng_seed
-            )
+            model = ElasticNet(l1_ratio=l1_ratio, alpha=float(final_alphas.get(w, 1e-3)), fit_intercept=False, max_iter=10000, random_state=rng_seed)
             model.fit(X_fit[active].fillna(0.0).values, y_fit.values)
-            coef = pd.Series(0.0, index=X.columns, dtype="float64"); coef[active] = model.coef_
-            final_coeffs[w] = coef; last_valid_coeffs[w] = coef.copy(); ema_coef[w] = coef.copy()
+            coef = pd.Series(0.0, index=X.columns, dtype="float64")
+            coef[active] = model.coef_
+            final_coeffs[w] = coef
+            last_valid_coeffs[w] = coef.copy()
+            ema_coef[w] = coef.copy()
         if persist_artifacts:
             fn = AUDIT_DIR / f"frozen_coeffs_{universe_name}_{pd.to_datetime(oos_start_date).strftime('%Y%m%d')}.pkl.gz"
             with gzip.open(fn, "wb") as f:
-                pickle.dump({'date': oos_start_date, 'coefficients': final_coeffs,
-                             'lookbacks': lookbacks, 'universe': universe_name,
-                             'frozen': True, 'rev': VERSION}, f)
+                pickle.dump({'date': oos_start_date, 'coefficients': final_coeffs, 'lookbacks': lookbacks, 'universe': universe_name, 'frozen': True, 'rev': VERSION}, f)
             logger.info(f"Saved frozen OOS coefficients → {fn}")
     for t in tqdm(range(initial_burn_in, len(X)), desc=f"WF ({universe_name})"):
         current_date = X.index[t]
@@ -501,12 +385,10 @@ def _build_single_universe(
                     dropped_events.append((current_date, w, dropped))
                 else:
                     alpha = float(alpha_star.get(w, 1e-3))
-                    model = ElasticNet(
-                        l1_ratio=l1_ratio, alpha=alpha, fit_intercept=False,
-                        max_iter=10000, random_state=rng_seed
-                    )
+                    model = ElasticNet(l1_ratio=l1_ratio, alpha=alpha, fit_intercept=False, max_iter=10000, random_state=rng_seed)
                     model.fit(X_fit[active].fillna(0.0).values, y_fit.values)
-                    coef = pd.Series(0.0, index=X.columns, dtype="float64"); coef[active] = model.coef_
+                    coef = pd.Series(0.0, index=X.columns, dtype="float64")
+                    coef[active] = model.coef_
                     last_valid_coeffs[w] = coef.copy()
             ema_coef[w] = coef.copy() if (ema_coef[w] is None) else ema_update(ema_coef[w], coef, alpha_ema)
             smooth_coef = ema_coef[w]
@@ -544,16 +426,11 @@ def _build_single_universe(
             dfw = weight_history[w].dropna(how='all')
             if len(dfw) > 1:
                 daily_turn = dfw.diff().abs().sum(axis=1)
-                turnover_metrics[w] = {
-                    'mean_daily': float(daily_turn.mean()),
-                    'std_daily': float(daily_turn.std()),
-                    'annual': float(daily_turn.mean() * 252)
-                }
+                turnover_metrics[w] = {'mean_daily': float(daily_turn.mean()), 'std_daily': float(daily_turn.std()), 'annual': float(daily_turn.mean() * 252)}
         if persist_artifacts:
             for w in lookbacks:
                 WEIGHT_HISTORY_DIR.mkdir(exist_ok=True, parents=True)
-                (weight_history[w].astype('float16')
-                    .to_parquet(WEIGHT_HISTORY_DIR / f"weights_{universe_name}_w{w}.parquet", compression='gzip'))
+                (weight_history[w].astype('float16').to_parquet(WEIGHT_HISTORY_DIR / f"weights_{universe_name}_w{w}.parquet", compression='gzip'))
             logger.info(f"Saved weight history → {WEIGHT_HISTORY_DIR}")
     if universe_name and hasattr(X_raw, 'columns'):
         winsor_warning_file = Path(config.FUTURES_INPUT_DIR) / "winsorization_warnings.txt"
@@ -565,52 +442,9 @@ def _build_single_universe(
                 overlap_pct = len(overlap) / max(1, len(high_clip_instruments)) * 100
                 logger.warning(f"High clipping ∩ persistence overlap: {len(overlap)} instruments ({overlap_pct:.1f}%) — {sorted(overlap)}")
     stability_metrics = {}
-    return {
-        'combined': pnl_final,
-        'final_alphas': final_coeffs if (freeze_coefficients and oos_start_date) else alpha_star,
-        'alpha_history': alpha_history,
-        'beta_history': beta_hist.astype('float32'),
-        'predictions_per_model': predictions_per_model.astype('float32'),
-        'dropped_instruments_count': len(dropped_events),
-        'dropped_instruments_unique': sorted(list(dropped_instruments_set)),
-        'dropped_events': dropped_events[:100],
-        'persistence_usage_pct': persistence_pct,
-        'avg_persistence_pct': avg_persistence_pct,
-        'freeze_mode': freeze_coefficients,
-        'ema_coef_final': {w: coef.astype('float32') for w, coef in ema_coef.items() if coef is not None},
-        'weight_history': None,
-        'turnover_metrics': turnover_metrics if track_turnover else None,
-        'stability_metrics': stability_metrics,
-        'risk_config': risk_config,
-    }
+    return {'combined': pnl_final, 'final_alphas': final_coeffs if (freeze_coefficients and oos_start_date) else alpha_star, 'alpha_history': alpha_history, 'beta_history': beta_hist.astype('float32'), 'predictions_per_model': predictions_per_model.astype('float32'), 'dropped_instruments_count': len(dropped_events), 'dropped_instruments_unique': sorted(list(dropped_instruments_set)), 'dropped_events': dropped_events[:100], 'persistence_usage_pct': persistence_pct, 'avg_persistence_pct': avg_persistence_pct, 'freeze_mode': freeze_coefficients, 'ema_coef_final': {w: coef.astype('float32') for w, coef in ema_coef.items() if coef is not None}, 'weight_history': None, 'turnover_metrics': turnover_metrics if track_turnover else None, 'stability_metrics': stability_metrics, 'risk_config': risk_config}
 
-def build_replica_walk_forward_dual_universe(
-    X_raw_small: pd.DataFrame,
-    X_raw_large: pd.DataFrame,
-    y: pd.Series,
-    lookbacks=(20, 25, 30, 35, 40),
-    alpha_grid=None,
-    l1_ratio: float = 0.5,
-    risk_config: RiskConfig | None = None,
-    ann_bdays: int = 252,
-    rng_seed: int = 42,
-    min_instruments: int = 5,
-    initial_training_window: int = 756,
-    min_history_pct: float = 0.7,
-    blend_win: int = 756,
-    oos_start_date: str | None = None,
-    oos_coefficient_window: int = 756,
-    n_splits: int = 5,
-    training_window: int = 756,
-    min_val_window: int = 20,
-    return_details: bool = True,
-    allow_missing_instruments: bool = False,
-    persist_artifacts: bool = True,
-    freeze_coefficients: bool = False,
-    alpha_ema: float = 0.33,
-    track_turnover: bool = True,
-    rebal_freq: str = "Q"
-) -> dict:
+def build_replica_walk_forward_dual_universe(X_raw_small: pd.DataFrame, X_raw_large: pd.DataFrame, y: pd.Series, lookbacks=(20, 25, 30, 35, 40), alpha_grid=None, l1_ratio: float = 0.5, risk_config: RiskConfig | None = None, ann_bdays: int = 252, rng_seed: int = 42, min_instruments: int = 5, initial_training_window: int = 756, min_history_pct: float = 0.7, blend_win: int = 756, oos_start_date: str | None = None, oos_coefficient_window: int = 756, n_splits: int = 5, training_window: int = 756, min_val_window: int = 20, return_details: bool = True, allow_missing_instruments: bool = False, persist_artifacts: bool = True, freeze_coefficients: bool = False, alpha_ema: float = 0.33, track_turnover: bool = True, rebal_freq: str = "Q") -> dict:
     if risk_config is None:
         risk_config = DEFAULT_RISK_CONFIG
     if not freeze_coefficients and oos_start_date:
@@ -622,20 +456,8 @@ def build_replica_walk_forward_dual_universe(
     logger.info(f"Risk config: inst_vol={risk_config.instrument_vol_target:.1%}, port_vol={risk_config.portfolio_vol_target:.1%}, cap={risk_config.max_leverage_cap:.2f}")
     if max(lookbacks) > training_window:
         logger.warning(f"Max lookback {max(lookbacks)} exceeds training_window {training_window}")
-    results_small = _build_single_universe(
-        X_raw_small, y, lookbacks, alpha_grid, l1_ratio, risk_config, ann_bdays, rng_seed,
-        min_instruments, initial_training_window, min_history_pct,
-        blend_win, oos_start_date, oos_coefficient_window, n_splits, training_window, min_val_window,
-        allow_missing_instruments, persist_artifacts, universe_name="small",
-        freeze_coefficients=freeze_coefficients, alpha_ema=alpha_ema, track_turnover=track_turnover
-    )
-    results_large = _build_single_universe(
-        X_raw_large, y, lookbacks, alpha_grid, l1_ratio, risk_config, ann_bdays, rng_seed,
-        min_instruments, initial_training_window, min_history_pct,
-        blend_win, oos_start_date, oos_coefficient_window, n_splits, training_window, min_val_window,
-        allow_missing_instruments, persist_artifacts, universe_name="large",
-        freeze_coefficients=freeze_coefficients, alpha_ema=alpha_ema, track_turnover=track_turnover
-    )
+    results_small = _build_single_universe(X_raw_small, y, lookbacks, alpha_grid, l1_ratio, risk_config, ann_bdays, rng_seed, min_instruments, initial_training_window, min_history_pct, blend_win, oos_start_date, oos_coefficient_window, n_splits, training_window, min_val_window, allow_missing_instruments, persist_artifacts, universe_name="small", freeze_coefficients=freeze_coefficients, alpha_ema=alpha_ema, track_turnover=track_turnover)
+    results_large = _build_single_universe(X_raw_large, y, lookbacks, alpha_grid, l1_ratio, risk_config, ann_bdays, rng_seed, min_instruments, initial_training_window, min_history_pct, blend_win, oos_start_date, oos_coefficient_window, n_splits, training_window, min_val_window, allow_missing_instruments, persist_artifacts, universe_name="large", freeze_coefficients=freeze_coefficients, alpha_ema=alpha_ema, track_turnover=track_turnover)
     pnl_small, pnl_large = results_small['combined'], results_large['combined']
     common_idx = pnl_small.index.intersection(pnl_large.index)
     pnl_small, pnl_large = pnl_small.loc[common_idx], pnl_large.loc[common_idx]
@@ -655,18 +477,7 @@ def build_replica_walk_forward_dual_universe(
     pnl_blended = (weights * pnl_small + (1 - weights) * pnl_large).astype("float32")
     logger.info(f"Blended P&L length: {len(pnl_blended)} days | Sharpe={pnl_blended.mean()/pnl_blended.std()*np.sqrt(252):.2f}")
     if return_details:
-        return {
-            'combined': pnl_blended,
-            'small_results': results_small,
-            'large_results': results_large,
-            'blend_weights': weights.astype("float32"),
-            'blend_sharpe': float(pnl_blended.mean() / pnl_blended.std() * np.sqrt(252)),
-            'small_sharpe': float(pnl_small.mean() / pnl_small.std() * np.sqrt(252)),
-            'large_sharpe': float(pnl_large.mean() / pnl_large.std() * np.sqrt(252)),
-            'freeze_coefficients': freeze_coefficients,
-            'rebal_freq': rebal_freq,
-            'risk_config': risk_config
-        }
+        return {'combined': pnl_blended, 'small_results': results_small, 'large_results': results_large, 'blend_weights': weights.astype("float32"), 'blend_sharpe': float(pnl_blended.mean() / pnl_blended.std() * np.sqrt(252)), 'small_sharpe': float(pnl_small.mean() / pnl_small.std() * np.sqrt(252)), 'large_sharpe': float(pnl_large.mean() / pnl_large.std() * np.sqrt(252)), 'freeze_coefficients': freeze_coefficients, 'rebal_freq': rebal_freq, 'risk_config': risk_config}
     return pnl_blended
 
 def compute_drawdown_attribution(results: dict, benchmark: pd.Series, n_top: int = 5) -> dict:
@@ -702,28 +513,13 @@ def compute_drawdown_attribution(results: dict, benchmark: pd.Series, n_top: int
             l_contrib = ((1.0 - w_small.loc[win_idx]) * pnl_large.loc[win_idx]).cumsum()
             total = ret.loc[win_idx].cumsum()
             max_dd = float(dd.loc[win_idx].min())
-            dd_attr[f"DD{i}"] = {
-                'period': {'start': start, 'end': end, 'max_drawdown': max_dd},
-                'small_contrib': s_contrib, 'large_contrib': l_contrib, 'total': total
-            }
+            dd_attr[f"DD{i}"] = {'period': {'start': start, 'end': end, 'max_drawdown': max_dd}, 'small_contrib': s_contrib, 'large_contrib': l_contrib, 'total': total}
         return dd_attr
     except Exception as e:
         print(f"compute_drawdown_attribution failed: {e}")
         return {}
 
-def run_extended_diagnostics(
-    results,
-    benchmark,
-    oos_start_date,
-    analysis_out: Path,
-    color_palette,
-    regime_colors,
-    *,
-    mode="dual",
-    include_persistence=False,
-    include_alpha_stability=True,
-    show_plots: bool = SHOW_PLOTS,
-):
+def run_extended_diagnostics(results, benchmark, oos_start_date, analysis_out: Path, color_palette, regime_colors, *, mode="dual", include_persistence=False, include_alpha_stability=True, show_plots: bool = SHOW_PLOTS):
     import numpy as np
     import pandas as pd
     import matplotlib.pyplot as plt
@@ -752,57 +548,48 @@ def run_extended_diagnostics(
             fig, ax = plt.subplots(figsize=(8, 6))
             lbs = sorted(t_single.keys())
             ann_turn = [t_single[w]['annual'] for w in lbs]
-            bar_color = (color_palette.get('large') if mode == "large_only"
-                         else color_palette.get('small'))
+            bar_color = (color_palette.get('large') if mode == "large_only" else color_palette.get('small'))
             title_prefix = "Large" if mode == "large_only" else "Small"
             ax.bar([f'{w}d' for w in lbs], ann_turn, color=bar_color, alpha=0.7)
             ax.set_title(f'{title_prefix} — Annual Turnover (Returns-Based)')
-            ax.set_xlabel('Lookback'); ax.set_ylabel('Annual Turnover')
+            ax.set_xlabel('Lookback')
+            ax.set_ylabel('Annual Turnover')
             ax.grid(True, alpha=0.3, axis='y')
             savefig_and_maybe_show(fig, analysis_out / "C_turnover_by_lookback_rev26.png", show=show_plots)
         elif t_small or t_large:
             fig, axes = plt.subplots(1, 2, figsize=(14, 6))
             if t_small:
                 lbs = sorted(t_small.keys())
-                axes[0].bar([f'{w}d' for w in lbs],
-                            [t_small[w]['annual'] for w in lbs],
-                            color=color_palette.get('small'), alpha=0.7)
+                axes[0].bar([f'{w}d' for w in lbs], [t_small[w]['annual'] for w in lbs], color=color_palette.get('small'), alpha=0.7)
                 axes[0].set_title('Small — Annual Turnover (Returns-Based)')
-                axes[0].set_xlabel('Lookback'); axes[0].set_ylabel('Annual Turnover')
+                axes[0].set_xlabel('Lookback')
+                axes[0].set_ylabel('Annual Turnover')
                 axes[0].grid(True, alpha=0.3, axis='y')
             else:
-                axes[0].text(0.5, 0.5, "No turnover (small)", ha='center', va='center'); axes[0].axis('off')
+                axes[0].text(0.5, 0.5, "No turnover (small)", ha='center', va='center')
+                axes[0].axis('off')
             if t_large:
                 lbs = sorted(t_large.keys())
-                axes[1].bar([f'{w}d' for w in lbs],
-                            [t_large[w]['annual'] for w in lbs],
-                            color=color_palette.get('large'), alpha=0.7)
+                axes[1].bar([f'{w}d' for w in lbs], [t_large[w]['annual'] for w in lbs], color=color_palette.get('large'), alpha=0.7)
                 axes[1].set_title('Large — Annual Turnover (Returns-Based)')
-                axes[1].set_xlabel('Lookback'); axes[1].set_ylabel('Annual Turnover')
+                axes[1].set_xlabel('Lookback')
+                axes[1].set_ylabel('Annual Turnover')
                 axes[1].grid(True, alpha=0.3, axis='y')
             else:
-                axes[1].text(0.5, 0.5, "No turnover (large)", ha='center', va='center'); axes[1].axis('off')
+                axes[1].text(0.5, 0.5, "No turnover (large)", ha='center', va='center')
+                axes[1].axis('off')
             savefig_and_maybe_show(fig, analysis_out / "C_turnover_by_lookback_rev26.png", show=show_plots)
         else:
             print("Skipping C — no turnover metrics found.")
         suffix = mode_suffix(mode)
         if t_single:
-            rows = [{'lookback': int(lb),
-                     'mean_daily': float(t_single[lb]['mean_daily']),
-                     'std_daily': float(t_single[lb]['std_daily']),
-                     'annual': float(t_single[lb]['annual'])} for lb in sorted(t_single.keys())]
+            rows = [{'lookback': int(lb), 'mean_daily': float(t_single[lb]['mean_daily']), 'std_daily': float(t_single[lb]['std_daily']), 'annual': float(t_single[lb]['annual'])} for lb in sorted(t_single.keys())]
         else:
             rows = []
             if t_small:
-                rows += [{'universe': 'small', 'lookback': int(lb),
-                          'mean_daily': float(t_small[lb]['mean_daily']),
-                          'std_daily': float(t_small[lb]['std_daily']),
-                          'annual': float(t_small[lb]['annual'])} for lb in sorted(t_small.keys())]
+                rows += [{'universe': 'small', 'lookback': int(lb), 'mean_daily': float(t_small[lb]['mean_daily']), 'std_daily': float(t_small[lb]['std_daily']), 'annual': float(t_small[lb]['annual'])} for lb in sorted(t_small.keys())]
             if t_large:
-                rows += [{'universe': 'large', 'lookback': int(lb),
-                          'mean_daily': float(t_large[lb]['mean_daily']),
-                          'std_daily': float(t_large[lb]['std_daily']),
-                          'annual': float(t_large[lb]['annual'])} for lb in sorted(t_large.keys())]
+                rows += [{'universe': 'large', 'lookback': int(lb), 'mean_daily': float(t_large[lb]['mean_daily']), 'std_daily': float(t_large[lb]['std_daily']), 'annual': float(t_large[lb]['annual'])} for lb in sorted(t_large.keys())]
         if rows:
             pd.DataFrame(rows).to_csv(analysis_out / f"turnover_by_lookback_rev26{suffix}.csv", index=False)
     except Exception as e:
@@ -812,12 +599,7 @@ def run_extended_diagnostics(
         coeffs_container = results.get('large_results') if has_large else (results.get('small_results') if has_small else results)
         coeffs = coeffs_container.get('ema_coef_final', None) if isinstance(coeffs_container, dict) else None
         if coeffs:
-            sectors = {
-                'Currencies': ['AUD','CAD','CHF','EUR','GBP','JPY'],
-                'Bonds': ['US2Y','US5Y','US10Y','BOBL','BUND'],
-                'Equities': ['S&P500','NASDAQ','DOW','EUROSTOXX','DAX','FTSE','TOPIX','HSI'],
-                'Commodities': ['WTI_CRUDE','BRENT_CRUDE','GASOIL','GOLD','SILVER','COPPER']
-            }
+            sectors = {'Currencies': ['AUD','CAD','CHF','EUR','GBP','JPY'],'Bonds': ['US2Y','US5Y','US10Y','BOBL','BUND'],'Equities': ['S&P500','NASDAQ','DOW','EUROSTOXX','DAX','FTSE','TOPIX','HSI'],'Commodities': ['WTI_CRUDE','BRENT_CRUDE','GASOIL','GOLD','SILVER','COPPER']}
             sector_weights = {}
             for lookback, coef in coeffs.items():
                 w_by_sector = {}
@@ -829,7 +611,9 @@ def run_extended_diagnostics(
                 dfw = pd.DataFrame(sector_weights).T
                 fig, ax = plt.subplots(figsize=(10, 6))
                 sns.heatmap(dfw, annot=True, fmt='.2%', cmap='YlOrRd', cbar_kws={'label': 'Risk Allocation (%)'}, ax=ax)
-                ax.set_title('Risk Allocation by Sector and Lookback', fontsize=14, weight='bold'); ax.set_xlabel('Sector'); ax.set_ylabel('Lookback')
+                ax.set_title('Risk Allocation by Sector and Lookback', fontsize=14, weight='bold')
+                ax.set_xlabel('Sector')
+                ax.set_ylabel('Lookback')
                 savefig_and_maybe_show(fig, analysis_out / "D_universe_contribution_heatmap_rev26.png", show=show_plots)
             else:
                 print("D skipped — coefficients empty.")
@@ -851,11 +635,13 @@ def run_extended_diagnostics(
             beta_norm = beta_no_inter.div(denom, axis=0).fillna(0.0)
             fig, ax = plt.subplots(figsize=(14, 6))
             cols = list(beta_norm.columns)
-            ax.stackplot(beta_norm.index, [beta_norm[c] for c in cols],
-                         labels=[f'{c}d' for c in cols], alpha=0.85)
+            ax.stackplot(beta_norm.index, [beta_norm[c] for c in cols], labels=[f'{c}d' for c in cols], alpha=0.85)
             ax.set_title('Evolution of Lookback Blend Weights', fontsize=14, weight='bold')
-            ax.set_ylabel('Normalized Weight'); ax.set_xlabel('Date'); ax.set_ylim(0, 1)
-            ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1)); ax.grid(True, alpha=0.3)
+            ax.set_ylabel('Normalized Weight')
+            ax.set_xlabel('Date')
+            ax.set_ylim(0, 1)
+            ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1))
+            ax.grid(True, alpha=0.3)
             if oos_start_date:
                 ax.axvline(pd.to_datetime(oos_start_date), color='black', linestyle='--', alpha=0.7, linewidth=2)
             savefig_and_maybe_show(fig, analysis_out / "E_lookback_blend_weights_rev26.png", show=show_plots)
@@ -871,13 +657,15 @@ def run_extended_diagnostics(
         fig, ax = plt.subplots(figsize=(14, 6))
         ax.hist(res, bins=60, alpha=0.85, edgecolor='black')
         ax.set_title('Residuals — Daily (Model − Benchmark)', fontsize=14, weight='bold')
-        ax.set_xlabel('Residual (daily return)'); ax.set_ylabel('Frequency')
+        ax.set_xlabel('Residual (daily return)')
+        ax.set_ylabel('Frequency')
         ax.grid(True, alpha=0.3)
         savefig_and_maybe_show(fig, analysis_out / f"F_residuals_hist_rev26{suffix}.png", show=show_plots)
         fig, ax = plt.subplots(figsize=(14, 6))
         res.cumsum().plot(ax=ax, lw=1.8, color=COLOR_PALETTE.get('blended', '#d62728'))
         ax.set_title('Cumulative Residual P&L (Alpha over Benchmark)', fontsize=14, weight='bold')
-        ax.set_ylabel('Cumulative residual (sum of daily returns)'); ax.set_xlabel('Date')
+        ax.set_ylabel('Cumulative residual (sum of daily returns)')
+        ax.set_xlabel('Date')
         ax.grid(True, alpha=0.3)
         if oos_start_date:
             ax.axvline(pd.to_datetime(oos_start_date), color='gray', linestyle='--', alpha=0.7)
@@ -900,9 +688,12 @@ def run_extended_diagnostics(
                 ax.plot(dates, dd_data['total'], color=color_palette['blended'], linewidth=2, label='Total')
                 p = dd_data['period']
                 ax.set_title(f"Drawdown {p['start'].date()} → {p['end'].date()} (Max {p['max_drawdown']:.1%})", fontsize=11)
-                ax.set_ylabel('Cum P&L'); ax.axhline(0, color='black', alpha=0.3)
-                ax.legend(fontsize=9); ax.grid(True, alpha=0.3)
-                ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m')); ax.xaxis.set_major_locator(mdates.MonthLocator(interval=1))
+                ax.set_ylabel('Cum P&L')
+                ax.axhline(0, color='black', alpha=0.3)
+                ax.legend(fontsize=9)
+                ax.grid(True, alpha=0.3)
+                ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+                ax.xaxis.set_major_locator(mdates.MonthLocator(interval=1))
                 plt.setp(ax.xaxis.get_majorticklabels(), rotation=45)
             savefig_and_maybe_show(fig, analysis_out / "F_drawdown_attribution_rev26.png", show=show_plots)
         else:
@@ -916,11 +707,19 @@ def run_extended_diagnostics(
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
         ax1.fill_between(dd_blended.index, 0, dd_blended*100, color=color_palette['blended'], alpha=0.7, label='Strategy')
         ax1.plot(dd_bench.index, dd_bench*100, color=color_palette['benchmark'], lw=2, label='SG Trend')
-        ax1.set_ylabel('Drawdown (%)'); ax1.set_title('Drawdown: Strategy vs Benchmark', fontsize=12, weight='bold'); ax1.legend(); ax1.grid(True, alpha=0.3); ax1.set_ylim(top=1)
+        ax1.set_ylabel('Drawdown (%)')
+        ax1.set_title('Drawdown: Strategy vs Benchmark', fontsize=12, weight='bold')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        ax1.set_ylim(top=1)
         dd_diff = dd_blended - dd_bench
         ax2.fill_between(dd_diff.index, 0, dd_diff*100, where=(dd_diff >= 0), alpha=0.5, color=color_palette['normal'], label='Strategy Better')
         ax2.fill_between(dd_diff.index, 0, dd_diff*100, where=(dd_diff < 0), alpha=0.5, color=color_palette['crisis'], label='Benchmark Better')
-        ax2.set_ylabel('DD Diff (%)'); ax2.set_xlabel('Date'); ax2.legend(); ax2.grid(True, alpha=0.3); ax2.axhline(0, color='black', alpha=0.5)
+        ax2.set_ylabel('DD Diff (%)')
+        ax2.set_xlabel('Date')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        ax2.axhline(0, color='black', alpha=0.5)
         for ax in (ax1, ax2):
             annotate_crisis_periods(ax)
             if oos_start_date:
@@ -938,10 +737,10 @@ def run_extended_diagnostics(
         colors = [(0.8,0,0), (1,1,1), (0,0.8,0)]
         cmap = LinearSegmentedColormap.from_list('custom', colors, N=100)
         fig, ax = plt.subplots(figsize=(14, 8))
-        sns.heatmap(heat, annot=True, fmt='.1f', cmap=cmap, center=0,
-                    cbar_kws={'label': 'Monthly Return (%)'}, ax=ax,
-                    xticklabels=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'])
-        ax.set_title('Monthly Returns Heatmap', fontsize=14, weight='bold'); ax.set_xlabel('Month'); ax.set_ylabel('Year')
+        sns.heatmap(heat, annot=True, fmt='.1f', cmap=cmap, center=0, cbar_kws={'label': 'Monthly Return (%)'}, ax=ax, xticklabels=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'])
+        ax.set_title('Monthly Returns Heatmap', fontsize=14, weight='bold')
+        ax.set_xlabel('Month')
+        ax.set_ylabel('Year')
         savefig_and_maybe_show(fig, analysis_out / "I_monthly_return_heatmap_rev26.png", show=show_plots)
     except Exception as e:
         print(f"I failed: {e}")
@@ -951,28 +750,24 @@ def run_extended_diagnostics(
         ann_model = ret.resample('Y').sum()
         ann_bench = benchmark.resample('Y').sum().reindex(ann_model.index)
         ann_alpha = ann_model - ann_bench
-        out = pd.DataFrame({
-            'model': ann_model,
-            'benchmark': ann_bench,
-            'alpha': ann_alpha
-        })
+        out = pd.DataFrame({'model': ann_model, 'benchmark': ann_bench, 'alpha': ann_alpha})
         out.index = out.index.year
         out.index.name = 'year'
         out.to_csv(analysis_out / f"Y_calendar_year_bars_rev26{suffix}.csv")
         fig, ax = plt.subplots(figsize=(14, 8))
         x = np.arange(len(out))
         width = 0.27
-        ax.bar(x - width, out['model'].to_numpy(), width, label='Model',
-               alpha=0.9, color=COLOR_PALETTE.get('blended', '#d62728'))
-        ax.bar(x,         out['benchmark'].to_numpy(), width, label='SG Trend',
-               alpha=0.9, color=COLOR_PALETTE.get('benchmark', '#9467bd'))
-        ax.bar(x + width, out['alpha'].to_numpy(), width, label='Alpha (Model − SG)',
-               alpha=0.9, color=COLOR_PALETTE.get('normal', '#2c3e50'))
-        ax.set_xticks(x); ax.set_xticklabels(out.index.astype(int), rotation=0)
+        ax.bar(x - width, out['model'].to_numpy(), width, label='Model', alpha=0.9, color=COLOR_PALETTE.get('blended', '#d62728'))
+        ax.bar(x, out['benchmark'].to_numpy(), width, label='SG Trend', alpha=0.9, color=COLOR_PALETTE.get('benchmark', '#9467bd'))
+        ax.bar(x + width, out['alpha'].to_numpy(), width, label='Alpha (Model − SG)', alpha=0.9, color=COLOR_PALETTE.get('normal', '#2c3e50'))
+        ax.set_xticks(x)
+        ax.set_xticklabels(out.index.astype(int), rotation=0)
         ax.set_title('Calendar-Year Returns', fontsize=14, weight='bold')
-        ax.set_xlabel('Year'); ax.set_ylabel('Return')
+        ax.set_xlabel('Year')
+        ax.set_ylabel('Return')
         ax.yaxis.set_major_formatter(PercentFormatter(1.0))
-        ax.grid(True, alpha=0.3, axis='y'); ax.legend()
+        ax.grid(True, alpha=0.3, axis='y')
+        ax.legend()
         savefig_and_maybe_show(fig, analysis_out / f"Y_calendar_year_bars_rev26{suffix}.png", show=show_plots)
     except Exception as e:
         print(f"Y calendar-year bars failed: {e}")
@@ -991,11 +786,14 @@ def run_extended_diagnostics(
             te63 = (res.rolling(63).std() * np.sqrt(252))
             fig, ax1 = plt.subplots(figsize=(14,6))
             ax1.plot(te63.index, te63, label='63d Residual TE (annualized)', lw=1.5)
-            ax1.yaxis.set_major_formatter(PercentFormatter(1.0)); ax1.set_ylabel('Residual TE'); ax1.grid(True, alpha=0.3)
+            ax1.yaxis.set_major_formatter(PercentFormatter(1.0))
+            ax1.set_ylabel('Residual TE')
+            ax1.grid(True, alpha=0.3)
             ax2 = ax1.twinx()
             ax2.plot(drift.index, drift, label='Daily Blender Drift (Σ|Δβ|)', lw=1.0, alpha=0.7, color=COLOR_PALETTE.get('normal'))
             ax1.set_title('Residual TE vs Lookback Blender Drift', fontsize=14, weight='bold')
-            ax1.legend(loc='upper left'); ax2.legend(loc='upper right')
+            ax1.legend(loc='upper left')
+            ax2.legend(loc='upper right')
             savefig_and_maybe_show(fig, analysis_out / f"RB_blender_weight_vs_residuals_rev26{mode_suffix(mode)}.png", show=show_plots)
         else:
             print("RB Extra: no beta_history found — skipped.")
@@ -1023,7 +821,9 @@ def run_extended_diagnostics(
             labels = [f'{c}d' for c in monthly.columns]
             ax.stackplot(monthly.index, [monthly[c].values for c in monthly.columns], labels=labels, alpha=0.9)
             ax.set_title('Lookback Contribution to Alpha (monthly sum)', fontsize=14, weight='bold')
-            ax.set_ylabel('Alpha (monthly sum of daily residual)'); ax.set_xlabel('Date'); ax.grid(True, alpha=0.3)
+            ax.set_ylabel('Alpha (monthly sum of daily residual)')
+            ax.set_xlabel('Date')
+            ax.grid(True, alpha=0.3)
             ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1))
             savefig_and_maybe_show(fig, analysis_out / f"RB_lookback_alpha_contribution_rev26{mode_suffix(mode)}.png", show=show_plots)
         else:
@@ -1036,18 +836,7 @@ def monitor_implementation_quality(results: dict, y: pd.Series) -> pd.DataFrame:
     pnl = results['combined']
     common_idx = pnl.index.intersection(y.index)
     risk_config = results.get('risk_config', DEFAULT_RISK_CONFIG)
-    metrics = {
-        'Sharpe (Model)': float(pnl.mean() / pnl.std() * np.sqrt(252)),
-        'Correlation with SG Trend': float(pnl.corr(y.loc[common_idx])),
-        'Tracking Error (vs SG Trend)': float((pnl - y.loc[common_idx]).std() * np.sqrt(252)),
-        'Autocorrelation (1d)': float(pnl.autocorr(lag=1)),
-        'Autocorrelation (5d)': float(pnl.autocorr(lag=5)),
-        'Max Drawdown': float((pnl.cumsum() - pnl.cumsum().expanding().max()).min()),
-        'Hit Rate': float((pnl > 0).mean()),
-        'Instrument Vol Target': risk_config.instrument_vol_target,
-        'Portfolio Vol Target': risk_config.portfolio_vol_target,
-        'Leverage Cap': risk_config.max_leverage_cap,
-    }
+    metrics = {'Sharpe (Model)': float(pnl.mean() / pnl.std() * np.sqrt(252)), 'Correlation with SG Trend': float(pnl.corr(y.loc[common_idx])), 'Tracking Error (vs SG Trend)': float((pnl - y.loc[common_idx]).std() * np.sqrt(252)), 'Autocorrelation (1d)': float(pnl.autocorr(lag=1)), 'Autocorrelation (5d)': float(pnl.autocorr(lag=5)), 'Max Drawdown': float((pnl.cumsum() - pnl.cumsum().expanding().max()).min()), 'Hit Rate': float((pnl > 0).mean()), 'Instrument Vol Target': risk_config.instrument_vol_target, 'Portfolio Vol Target': risk_config.portfolio_vol_target, 'Leverage Cap': risk_config.max_leverage_cap}
     if 'small_results' in results:
         sp = results['small_results']['combined']
         metrics['Small Universe Sharpe'] = float(sp.mean() / sp.std() * np.sqrt(252))
@@ -1076,9 +865,12 @@ def analyze_persistence_usage(results: dict) -> None:
             uniq_drop = udata.get('dropped_instruments_unique', [])
             if uniq_drop:
                 print(f"  Affected instruments: {', '.join(map(str, uniq_drop))}")
-            if avg_pct > 20: print("  CRITICAL: Very high persistence → investigate data quality")
-            elif avg_pct > 10: print("  WARNING: High persistence → consider relaxing filters")
-            else: print("  Persistence usage within normal range")
+            if avg_pct > 20:
+                print("  CRITICAL: Very high persistence → investigate data quality")
+            elif avg_pct > 10:
+                print("  WARNING: High persistence → consider relaxing filters")
+            else:
+                print("  Persistence usage within normal range")
 
 def calculate_detailed_metrics(returns, benchmark, period_name, apply_burnin=True, burn_in_days=189):
     if apply_burnin and len(returns) > burn_in_days:
@@ -1111,10 +903,7 @@ def process_sg_trend_data():
         df = pd.read_excel(book, sheet_name=sheet, parse_dates=["Date"])
         if "Last Price" not in df.columns:
             continue
-        idx = (df[["Date", "Last Price"]].dropna()
-               .assign(Date=lambda d: to_utc(d["Date"]))
-               .set_index("Date").sort_index()
-               .asfreq("B").ffill(limit=1).bfill(limit=1))
+        idx = (df[["Date", "Last Price"]].dropna().assign(Date=lambda d: to_utc(d["Date"])).set_index("Date").sort_index().asfreq("B").ffill(limit=1).bfill(limit=1))
         idx = idx.loc[FILTER_START:FILTER_END]
         pct_daily = idx["Last Price"].pct_change()
         mu, sigma = pct_daily.mean(), pct_daily.std()
@@ -1140,10 +929,7 @@ def process_futures_data():
     CFG_DIR = Path(config.FUTURES_INPUT_DIR) / "csvconfig"
     OUT_DIR = Path(config.FUTURES_INPUT_DIR) / "adjusted_prices_csv"
     ROLL_OFFSET_BD = 5
-    SKIP = ({"HANGTECH", "IBEX"}
-            | {p.stem for p in PRICE_DIR.glob("*_micro.csv")}
-            | {p.stem for p in PRICE_DIR.glob("*_mini.csv")}
-            | AGS_DROP)
+    SKIP = ({"HANGTECH", "IBEX"} | {p.stem for p in PRICE_DIR.glob("*_micro.csv")} | {p.stem for p in PRICE_DIR.glob("*_mini.csv")} | AGS_DROP)
     FILTER_START = pd.Timestamp("2000-01-03", tz="UTC")
     FILTER_END = pd.Timestamp("2024-03-29", tz="UTC")
     inst = pd.read_csv(CFG_DIR / "instrumentconfig.csv").set_index("Instrument")
@@ -1184,25 +970,14 @@ def process_futures_data():
                 if a in wide.columns:
                     return a
             raise KeyError(f"{alts} missing in {path.name}")
-        wide = wide.rename(columns={
-            pick("DATETIME", "DATE_TIME", "DATE"): "Date",
-            pick("PRICE", "PX_LAST", "CLOSE"): "Price",
-            pick("PRICE_CONTRACT", "CONTRACT"): "PriceContract",
-            pick("CARRY", "CARRY_LAST"): "Carry",
-            pick("CARRY_CONTRACT"): "CarryContract",
-            pick("FORWARD", "FORWARD_LAST"): "Forward",
-            pick("FORWARD_CONTRACT"): "ForwardContract"
-        })
+        wide = wide.rename(columns={pick("DATETIME", "DATE_TIME", "DATE"): "Date", pick("PRICE", "PX_LAST", "CLOSE"): "Price", pick("PRICE_CONTRACT", "CONTRACT"): "PriceContract", pick("CARRY", "CARRY_LAST"): "Carry", pick("CARRY_CONTRACT"): "CarryContract", pick("FORWARD", "FORWARD_LAST"): "Forward", pick("FORWARD_CONTRACT"): "ForwardContract"})
         UNIT_FIX = {"Silver": .01, "GAS_": .01, "Corn_mini": .01, "Wheat_mini": .01, "Sugar": .01, "HG1": .01, "RB": .01}
         fac = next((UNIT_FIX[p] for p in UNIT_FIX if root.startswith(p.rstrip("_"))), 1)
         wide[["Price", "Carry", "Forward"]] = (wide[["Price", "Carry", "Forward"]].apply(pd.to_numeric, errors="coerce") * fac)
-        price_rows = (wide[["Date", "PriceContract", "Price"]].rename(columns={"PriceContract": "Contract", "Price": "Close"}).assign(Kind="Price"))
-        carry_rows = (wide[["Date", "CarryContract", "Carry"]].rename(columns={"CarryContract": "Contract", "Carry": "Close"}).assign(Kind="Carry"))
-        fwd_rows   = (wide[["Date", "ForwardContract", "Forward"]].rename(columns={"ForwardContract": "Contract", "Forward": "Close"}).assign(Kind="Forward"))
-        long = (pd.concat([price_rows, carry_rows, fwd_rows], ignore_index=True)
-                .dropna(subset=["Close"])
-                .assign(Date=lambda d: to_utc(pd.to_datetime(d["Date"]).dt.normalize()))
-                .sort_values(["Date", "Contract"]))
+        price_rows = (wide[["Date", "PriceContract", "Price"]].rename(columns={"PriceContract": "Contract", "Price": "Price"}).assign(Kind="Price"))
+        carry_rows = (wide[["Date", "CarryContract", "Carry"]].rename(columns={"CarryContract": "Contract", "Carry": "Price"}).assign(Kind="Carry"))
+        fwd_rows = (wide[["Date", "ForwardContract", "Forward"]].rename(columns={"ForwardContract": "Contract", "Forward": "Price"}).assign(Kind="Forward"))
+        long = (pd.concat([price_rows, carry_rows, fwd_rows], ignore_index=True).dropna(subset=["Price"]).assign(Date=lambda d: to_utc(pd.to_datetime(d["Date"]).dt.normalize())).sort_values(["Date", "Contract"]))
         long = long[(long["Date"] >= FILTER_START) & (long["Date"] <= FILTER_END)]
         return long
     for csv_path in sorted(PRICE_DIR.glob("*.csv")):
@@ -1214,21 +989,18 @@ def process_futures_data():
         if not roll_file.exists():
             print(f"{root}: missing roll calendar")
             continue
-        roll = (pd.read_csv(roll_file, parse_dates=["DATE_TIME"])
-                .rename(columns={"DATE_TIME": "RollDate", "current_contract": "Current", "next_contract": "Next"})
-                .sort_values("RollDate")
-                .assign(ExecDate=lambda d: d["RollDate"] - BDay(ROLL_OFFSET_BD)))
+        roll = (pd.read_csv(roll_file, parse_dates=["DATE_TIME"]).rename(columns={"DATE_TIME": "RollDate", "current_contract": "Current", "next_contract": "Next"}).sort_values("RollDate").assign(ExecDate=lambda d: d["RollDate"] - BDay(ROLL_OFFSET_BD)))
         roll["ExecDate"] = pd.to_datetime(roll["ExecDate"]).dt.tz_localize("UTC")
         roll = roll[(roll["ExecDate"] >= FILTER_START) & (roll["ExecDate"] <= FILTER_END)]
         adj_factor, factor = {}, 1.0
         for cur, nxt, ex in zip(roll["Current"][::-1], roll["Next"][::-1], roll["ExecDate"][::-1]):
             adj_factor[cur] = factor
-            p_cur = long.query("Contract == @cur & Date == @ex & Kind == 'Price'")["Close"]
-            p_nxt = long.query("Contract == @nxt & Date == @ex & Kind == 'Price'")["Close"]
+            p_cur = long.query("Contract == @cur & Date == @ex & Kind == 'Price'")["Price"]
+            p_nxt = long.query("Contract == @nxt & Date == @ex & Kind == 'Price'")["Price"]
             if not p_cur.empty and not p_nxt.empty:
                 ratio = p_nxt.iat[-1] / p_cur.iat[0]
                 factor *= ratio if ratio < 5 else 1/ratio
-        long["AdjPrice"] = long["Close"] * long["Contract"].map(adj_factor).fillna(1.0)
+        long["AdjPrice"] = long["Price"] * long["Contract"].map(adj_factor).fillna(1.0)
         price = (long.query("Kind == 'Price'").set_index("Date")["AdjPrice"].groupby("Date").last().ffill(limit=3))
         gap_mask = price.index.to_series().diff().dt.days.gt(7)
         price[gap_mask] = np.nan
@@ -1237,14 +1009,14 @@ def process_futures_data():
         price_ret = price.pct_change()
         has_carry = not long.query("Kind == 'Carry'").empty
         if has_carry:
-            carry = (long.query("Kind == 'Carry'").pivot_table(index="Date", columns="Contract", values="Close", aggfunc="last"))
+            carry = (long.query("Kind == 'Carry'").pivot_table(index="Date", columns="Contract", values="Price", aggfunc="last"))
             carry_ret = carry.diff().stack().groupby(level=0).sum() / price.shift(1)
             roll_ret = carry_ret.reindex(price_ret.index).fillna(0.0)
         else:
             jumps = {}
             for cur, nxt, ex in zip(roll["Current"], roll["Next"], roll["ExecDate"]):
-                p_cur = long.query("Contract == @cur & Date == @ex & Kind == 'Price'")["Close"]
-                p_nxt = long.query("Contract == @nxt & Date == @ex & Kind == 'Price'")["Close"]
+                p_cur = long.query("Contract == @cur & Date == @ex & Kind == 'Price'")["Price"]
+                p_nxt = long.query("Contract == @nxt & Date == @ex & Kind == 'Price'")["Price"]
                 if not p_cur.empty and not p_nxt.empty:
                     jumps[ex] = p_nxt.iat[0] / p_cur.iat[0] - 1
             roll_ret = pd.Series(jumps).reindex(price_ret.index).fillna(0.0)
@@ -1279,12 +1051,17 @@ def process_futures_data():
         winsor_df = pd.DataFrame(winsorization_stats)
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
         ax1.hist(winsor_df['pct_clipped'], bins=30, color=COLOR_PALETTE.get('normal', '#777'), edgecolor='black', alpha=0.7)
-        ax1.axvline(winsor_df['pct_clipped'].mean(), color=COLOR_PALETTE['crisis'], linestyle='--', linewidth=2,
-                    label=f"Mean: {winsor_df['pct_clipped'].mean():.2f}%")
-        ax1.set_xlabel('Pct Clipped (%)'); ax1.set_ylabel('# Instruments'); ax1.set_title('Winsorization Impact'); ax1.legend(); ax1.grid(True, alpha=0.3)
+        ax1.axvline(winsor_df['pct_clipped'].mean(), color=COLOR_PALETTE['crisis'], linestyle='--', linewidth=2, label=f"Mean: {winsor_df['pct_clipped'].mean():.2f}%")
+        ax1.set_xlabel('Pct Clipped (%)')
+        ax1.set_ylabel('# Instruments')
+        ax1.set_title('Winsorization Impact')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
         top_clipped = winsor_df.nlargest(10, 'pct_clipped')
         ax2.barh(top_clipped['instrument'], top_clipped['pct_clipped'], color=COLOR_PALETTE.get('large'))
-        ax2.set_xlabel('Pct Clipped (%)'); ax2.set_title('Top 10 Most Winsorized'); ax2.grid(True, alpha=0.3, axis='x')
+        ax2.set_xlabel('Pct Clipped (%)')
+        ax2.set_title('Top 10 Most Winsorized')
+        ax2.grid(True, alpha=0.3, axis='x')
         savefig_and_maybe_show(fig, RB_DIR / "winsorization_analysis_rev26.png", show=SHOW_PLOTS)
         print("\n--- Winsorization Summary ---")
         print(f"Average clipping: {winsor_df['pct_clipped'].mean():.2f}%")
@@ -1295,7 +1072,8 @@ def process_futures_data():
 
 def build_panel():
     SRC_DIR = Path(config.FUTURES_INPUT_DIR) / "adjusted_prices_csv"
-    DEST_DIR = Path(config.PANEL_OUTPUT_DIR); DEST_DIR.mkdir(parents=True, exist_ok=True)
+    DEST_DIR = Path(config.PANEL_OUTPUT_DIR)
+    DEST_DIR.mkdir(parents=True, exist_ok=True)
     FILTER_START = pd.Timestamp("2000-01-03", tz="UTC")
     FILTER_END = pd.Timestamp("2024-03-29", tz="UTC")
     sg_calendar_path = Path(config.SG_TREND_INPUT_DIR) / "sg_trend_calendar.pkl"
@@ -1345,33 +1123,7 @@ def create_large_universe():
     FILTER_END = pd.Timestamp("2024-03-29", tz="UTC")
     PANEL_RAW = Path(config.PANEL_OUTPUT_DIR) / "X_panel.parquet"
     X_raw = pd.read_parquet(PANEL_RAW).astype("float32").loc[FILTER_START:FILTER_END]
-    ALIASES = {
-        "AUD": ["AUD","6A","AD"],
-        "CAD": ["CAD","6C","CD"],
-        "CHF": ["CHF","6S","SF"],
-        "EUR": ["EUR","EC","6E"],
-        "GBP": ["GBP","BP","6B"],
-        "JPY": ["JPY","JY","6J"],
-        "US2Y": ["US2Y","US2","TU"],
-        "US5Y": ["US5Y","US5","FV"],
-        "US10Y": ["US10Y","US10","TY"],
-        "BOBL": ["BOBL"],
-        "BUND": ["BUND","RX","BTP"],
-        "S&P500": ["S&P500","SP500","ES"],
-        "NASDAQ": ["NASDAQ","NQ"],
-        "DOW": ["DOW","YM"],
-        "EUROSTOXX": ["EUROSTOXX","EUROSTX","VG","FESX","SX5E"],
-        "DAX": ["DAX","GX","FDAX"],
-        "FTSE": ["FTSE","FTSE100","Z"],
-        "TOPIX": ["TOPIX","TPX","NI"],
-        "HSI": ["HSI","HSI_mini","HANGSENG"],
-        "WTI_CRUDE": ["CRUDE_W","WTI_CRUDE","CL","CL1"],
-        "BRENT_CRUDE": ["BRENT_LAST","BRENT_W","BRE","BRN","CO"],
-        "GASOIL": ["GASOIL","QS","GO"],
-        "GOLD": ["GOLD","GC","GC_MINI"],
-        "SILVER": ["SILVER","SI"],
-        "COPPER": ["COPPER","HG","HG_MINI"]
-    }
+    ALIASES = {"AUD": ["AUD","6A","AD"],"CAD": ["CAD","6C","CD"],"CHF": ["CHF","6S","SF"],"EUR": ["EUR","EC","6E"],"GBP": ["GBP","BP","6B"],"JPY": ["JPY","JY","6J"],"US2Y": ["US2Y","US2","TU"],"US5Y": ["US5Y","US5","FV"],"US10Y": ["US10Y","US10","TY"],"BOBL": ["BOBL"],"BUND": ["BUND","RX","BTP"],"S&P500": ["S&P500","SP500","ES"],"NASDAQ": ["NASDAQ","NQ"],"DOW": ["DOW","YM"],"EUROSTOXX": ["EUROSTOXX","EUROSTX","VG","FESX","SX5E"],"DAX": ["DAX","GX","FDAX"],"FTSE": ["FTSE","FTSE100","Z"],"TOPIX": ["TOPIX","TPX","NI"],"HSI": ["HSI","HSI_mini","HANGSENG"],"WTI_CRUDE": ["CRUDE_W","WTI_CRUDE","CL","CL1"],"BRENT_CRUDE": ["BRENT_LAST","BRENT_W","BRE","BRN","CO"],"GASOIL": ["GASOIL","QS","GO"],"GOLD": ["GOLD","GC","GC_MINI"],"SILVER": ["SILVER","SI"],"COPPER": ["COPPER","HG","HG_MINI"]}
     MIN_DAYS = 500
     picked, used_lbl = {}, {}
     for friendly, labels in ALIASES.items():
@@ -1400,24 +1152,14 @@ def create_small_universe():
     FILTER_END = pd.Timestamp("2024-03-29", tz="UTC")
     PANEL_RAW = Path(config.PANEL_OUTPUT_DIR) / "X_panel.parquet"
     X_raw = pd.read_parquet(PANEL_RAW).astype("float32").loc[FILTER_START:FILTER_END]
-    ALIASES = {
-        "AD": ["AD", "AUD", "6A"],
-        "BP": ["BP", "GBP", "6B"],
-        "CD": ["CD", "CAD", "6C"],
-        "EC": ["EC", "EUR", "6E"],
-        "JY": ["JY", "JPY", "6J"],
-        "FV": ["FV", "US5Y", "US5"],
-        "RX": ["RX", "BUND", "BUND10"],
-        "ES": ["ES", "S&P500", "SP500"],
-        "CL": ["CL", "WTI_CRUDE", "CRUDE_W"],
-        "GC": ["GC", "GOLD", "GC_MINI"],
-    }
+    ALIASES = {"AD": ["AD", "AUD", "6A"],"BP": ["BP", "GBP", "6B"],"CD": ["CD", "CAD", "6C"],"EC": ["EC", "EUR", "6E"],"JY": ["JY", "JPY", "6J"],"FV": ["FV", "US5Y", "US5"],"RX": ["RX", "BUND", "BUND10"],"ES": ["ES", "S&P500", "SP500"],"CL": ["CL", "WTI_CRUDE", "CRUDE_W"],"GC": ["GC", "GOLD", "GC_MINI"]}
     MIN_DAYS = 500
     picked_cols, friendly_map = [], {}
     for friendly, alts in ALIASES.items():
         for lbl in alts:
             if lbl in X_raw.columns and X_raw[lbl].notna().sum() >= MIN_DAYS:
-                picked_cols.append(lbl); friendly_map[friendly] = lbl
+                picked_cols.append(lbl)
+                friendly_map[friendly] = lbl
                 if lbl != friendly:
                     print(f"→ {friendly}: using alias '{lbl}'")
                 break
@@ -1435,30 +1177,43 @@ def create_small_universe():
 
 def create_instrument_config():
     print("Building instrument configuration…")
-    cfg_dir = BASE_DIR / "cfg"; cfg_dir.mkdir(exist_ok=True)
+    cfg_dir = BASE_DIR / "cfg"
+    cfg_dir.mkdir(exist_ok=True)
     all_instruments = set()
     large_path = Path(config.PANEL_OUTPUT_DIR) / "X_large_universe/X_large_universe.parquet"
     small_path = Path(config.PANEL_OUTPUT_DIR) / "X_small_universe/X_small_universe.parquet"
     if large_path.exists():
-        X_large = pd.read_parquet(large_path); all_instruments.update(X_large.columns)
+        X_large = pd.read_parquet(large_path)
+        all_instruments.update(X_large.columns)
     if small_path.exists():
-        X_small = pd.read_parquet(small_path); all_instruments.update(X_small.columns)
+        X_small = pd.read_parquet(small_path)
+        all_instruments.update(X_small.columns)
     if not all_instruments:
-        print("No instruments found — run data processing first"); return
+        print("No instruments found — run data processing first")
+        return
     def guess_asset_class(inst):
         u = str(inst).upper()
-        direct = {'CRUDE_W':'Energy','SP500':'Equity','S&P500':'Equity','TOPIX':'Equity',
-                  'US5':'Bond','US5Y':'Bond','US10':'Bond','US10Y':'Bond','US2':'Bond','US2Y':'Bond','US30':'Bond','US30Y':'Bond'}
-        if u in direct: return direct[u]
-        if any(x in u for x in ['CRUDE','OIL','BRENT','WTI','CL','NG','GASOIL','HO','RB']): return 'Energy'
-        if any(x in u for x in ['CORN','WHEAT','SOYBEAN','SUGAR','COFFEE','COCOA','COTTON','C_','S_','W_','KW','CT','SB','CC','KC']): return 'Ags'
-        if any(x in u for x in ['GOLD','SILVER','COPPER','ALUMINUM','PLATINUM','PALLADIUM','GC','SI','HG','AL','PL','PA']): return 'Metals'
-        if any(x in u for x in ['CATTLE','HOGS','LC','LH','FC']): return 'Livestock'
-        if any(x in u for x in ['EUR','GBP','JPY','CHF','AUD','CAD','NZD','MXN','SEK','NOK']) and len(u) <= 6 and not any(x in u for x in ['BOND','RATE','YIELD']): return 'FX'
-        if u.startswith('US') and any(ch.isdigit() for ch in u): return 'Bond'
-        if any(x in u for x in ['TY','FV','TU','ED','FF','ZN','ZB','ZT','ZF','ZQ','GE','BOBL','BUND','BTP','GILT','JGB','BOND','RATE']): return 'Bond'
-        if any(x in u for x in ['TOPIX','SP500','S&P','ES','NQ','NASDAQ','DOW','FTSE','DAX','EUROSTOXX','STOXX','NIKKEI','HANG','HSI','ASX','KOSPI','SENSEX','NIFTY','EMD','RTY','YM','SX5E']): return 'Equity'
-        if any(x in u for x in ['VIX','VX','VSTOXX','VNKY']): return 'Vol'
+        direct = {'CRUDE_W':'Energy','SP500':'Equity','S&P500':'Equity','TOPIX':'Equity','US5':'Bond','US5Y':'Bond','US10':'Bond','US10Y':'Bond','US2':'Bond','US2Y':'Bond','US30':'Bond','US30Y':'Bond'}
+        if u in direct:
+            return direct[u]
+        if any(x in u for x in ['CRUDE','OIL','BRENT','WTI','CL','NG','GASOIL','HO','RB']):
+            return 'Energy'
+        if any(x in u for x in ['CORN','WHEAT','SOYBEAN','SUGAR','COFFEE','COCOA','COTTON','C_','S_','W_','KW','CT','SB','CC','KC']):
+            return 'Ags'
+        if any(x in u for x in ['GOLD','SILVER','COPPER','ALUMINUM','PLATINUM','PALLADIUM','GC','SI','HG','AL','PL','PA']):
+            return 'Metals'
+        if any(x in u for x in ['CATTLE','HOGS','LC','LH','FC']):
+            return 'Livestock'
+        if any(x in u for x in ['EUR','GBP','JPY','CHF','AUD','CAD','NZD','MXN','SEK','NOK']) and len(u) <= 6 and not any(x in u for x in ['BOND','RATE','YIELD']):
+            return 'FX'
+        if u.startswith('US') and any(ch.isdigit() for ch in u):
+            return 'Bond'
+        if any(x in u for x in ['TY','FV','TU','ED','FF','ZN','ZB','ZT','ZF','ZQ','GE','BOBL','BUND','BTP','GILT','JGB','BOND','RATE']):
+            return 'Bond'
+        if any(x in u for x in ['TOPIX','SP500','S&P','ES','NQ','NASDAQ','DOW','FTSE','DAX','EUROSTOXX','STOXX','NIKKEI','HANG','HSI','ASX','KOSPI','SENSEX','NIFTY','EMD','RTY','YM','SX5E']):
+            return 'Equity'
+        if any(x in u for x in ['VIX','VX','VSTOXX','VNKY']):
+            return 'Vol'
         return 'Other'
     inst_config = pd.DataFrame({'Instrument': sorted(list(all_instruments))})
     inst_config['AssetClass'] = inst_config['Instrument'].apply(guess_asset_class)
@@ -1469,24 +1224,10 @@ def create_instrument_config():
     if others:
         print(f"Instruments classified as 'Other': {others[:20]}{' …' if len(others) > 20 else ''}")
 
-def create_sg_trend_visualizations(
-    results_dual_sg,
-    ret_sg,
-    pnl_small,
-    pnl_large,
-    benchmark,
-    burn_in_end_date,
-    BURN_IN_DAYS,
-    BURN_IN_MONTHS,
-    OOS_START_DATE,
-    TRAIN_VAL_END_DATE,
-    custom_risk_config,
-    ANALYSIS_OUT,
-    mode="dual",
-    show_plots: bool = SHOW_PLOTS,
-):
+def create_sg_trend_visualizations(results_dual_sg, ret_sg, pnl_small, pnl_large, benchmark, burn_in_end_date, BURN_IN_DAYS, BURN_IN_MONTHS, OOS_START_DATE, TRAIN_VAL_END_DATE, custom_risk_config, ANALYSIS_OUT, mode="dual", show_plots: bool = SHOW_PLOTS):
     def to_naive(d):
-        if d is None: return None
+        if d is None:
+            return None
         dt = pd.to_datetime(d)
         if getattr(dt, 'tzinfo', None) is None:
             dt = dt.tz_localize('UTC')
@@ -1515,15 +1256,22 @@ def create_sg_trend_visualizations(
         idx = cum_ret.index.tz_convert(None) if getattr(cum_ret.index, 'tz', None) else cum_ret.index
         ax.plot(idx, cum_ret, lw=1.8, label=label, color=color)
     burn_span_start = None
-    if ret_sg is not None and len(ret_sg) > 0: burn_span_start = ret_sg.index[0]
-    elif mode == "large_only" and pnl_large is not None and len(pnl_large) > 0: burn_span_start = pnl_large.index[0]
-    elif mode == "small_only" and pnl_small is not None and len(pnl_small) > 0: burn_span_start = pnl_small.index[0]
+    if ret_sg is not None and len(ret_sg) > 0:
+        burn_span_start = ret_sg.index[0]
+    elif mode == "large_only" and pnl_large is not None and len(pnl_large) > 0:
+        burn_span_start = pnl_large.index[0]
+    elif mode == "small_only" and pnl_small is not None and len(pnl_small) > 0:
+        burn_span_start = pnl_small.index[0]
     if burn_span_start is not None and burn_in_end_date is not None:
         ax.axvspan(to_naive(burn_span_start), to_naive(burn_in_end_date), alpha=0.1, color="gray", label=f"{BURN_IN_MONTHS}-Month Burn-in")
     annotate_crisis_periods(ax)
     ax.axvline(to_naive(OOS_START_DATE), color="black", linestyle="--", alpha=0.7, linewidth=2, label="OOS Start")
     ax.set_title(f"Cumulative Growth of $100 (Vol Target: {custom_risk_config.portfolio_vol_target:.0%})", fontsize=14, weight="bold")
-    ax.set_ylabel("Portfolio Value ($)"); ax.set_xlabel("Date"); ax.legend(loc="upper left", framealpha=0.9); ax.grid(True, alpha=0.3); ax.set_yscale("log")
+    ax.set_ylabel("Portfolio Value ($)")
+    ax.set_xlabel("Date")
+    ax.legend(loc="upper left", framealpha=0.9)
+    ax.grid(True, alpha=0.3)
+    ax.set_yscale("log")
     for label, series, color in series_to_plot:
         try:
             final_value = 100 * (1 + series).cumprod().iloc[-1]
@@ -1537,7 +1285,8 @@ def create_sg_trend_visualizations(
     if ret_sg is None or benchmark is None or len(ret_sg) == 0 or len(benchmark) == 0:
         print("Missing data for rolling stats; skipping.")
     else:
-        ret_sg_after = ret_sg.loc[burn_in_end_date:]; bench_after = benchmark.loc[burn_in_end_date:]
+        ret_sg_after = ret_sg.loc[burn_in_end_date:]
+        bench_after = benchmark.loc[burn_in_end_date:]
         if len(ret_sg_after) < window + 10:
             print("Not enough data after burn-in; skipping Chart B.")
         else:
@@ -1550,23 +1299,32 @@ def create_sg_trend_visualizations(
             ax1.axhline(y=float(roll_corr.mean()), color="black", linestyle="--", alpha=0.5, label=f"Mean: {float(roll_corr.mean()):.3f}")
             ax1.set_ylabel("Correlation")
             ax1.set_title(f"Rolling 1Y Statistics (Ex-Burn-in)", fontsize=12, weight="bold")
-            ax1.legend(); ax1.grid(True, alpha=0.3); ax1.set_ylim(0, 1)
+            ax1.legend()
+            ax1.grid(True, alpha=0.3)
+            ax1.set_ylim(0, 1)
             c_rs2 = COLOR_PALETTE["blended"] if mode == "dual" else (COLOR_PALETTE["large"] if mode == "large_only" else COLOR_PALETTE["small"])
             ax2.plot(roll_rs2.index, roll_rs2, color=c_rs2, lw=1.5)
             ax2.axhline(y=float(roll_rs2.mean()), color="black", linestyle="--", alpha=0.5, label=f"Mean: {float(roll_rs2.mean()):.3f}")
             ax2.fill_between(roll_rs2.index, 0, roll_rs2, alpha=0.2, color=c_rs2)
-            ax2.set_ylabel("R-squared"); ax2.legend(); ax2.grid(True, alpha=0.3); ax2.set_ylim(0, 1)
-            ax2.text(0.02, 0.95, f"Avg Variance Explained: {float(roll_rs2.mean())*100:.1f}%", transform=ax2.transAxes,
-                     bbox=dict(boxstyle="round", facecolor="white", alpha=0.8), va="top", fontsize=9)
+            ax2.set_ylabel("R-squared")
+            ax2.legend()
+            ax2.grid(True, alpha=0.3)
+            ax2.set_ylim(0, 1)
+            ax2.text(0.02, 0.95, f"Avg Variance Explained: {float(roll_rs2.mean())*100:.1f}%", transform=ax2.transAxes, bbox=dict(boxstyle="round", facecolor="white", alpha=0.8), va="top", fontsize=9)
             ax3.plot(roll_te.index, roll_te, color=COLOR_PALETTE["crisis"], lw=1.5)
             ax3.axhline(y=float(roll_te.mean()), color="black", linestyle="--", alpha=0.5, label=f"Mean: {float(roll_te.mean()):.1%}")
-            ax3.set_ylabel("Tracking Error"); ax3.yaxis.set_major_formatter(PercentFormatter(1.0))
-            ax3.legend(); ax3.grid(True, alpha=0.3)
+            ax3.set_ylabel("Tracking Error")
+            ax3.yaxis.set_major_formatter(PercentFormatter(1.0))
+            ax3.legend()
+            ax3.grid(True, alpha=0.3)
             c_ir = COLOR_PALETTE["small"] if mode == "dual" else (COLOR_PALETTE["large"] if mode == "large_only" else COLOR_PALETTE["small"])
             ax4.plot(roll_ir.index, roll_ir, color=c_ir, lw=1.5)
             ax4.axhline(y=0, color="black", linestyle="-", alpha=0.5)
             ax4.axhline(y=float(roll_ir.mean()), color="black", linestyle="--", alpha=0.5, label=f"Mean IR: {float(roll_ir.mean()):.3f}")
-            ax4.set_ylabel("Information Ratio"); ax4.set_xlabel("Date"); ax4.legend(); ax4.grid(True, alpha=0.3)
+            ax4.set_ylabel("Information Ratio")
+            ax4.set_xlabel("Date")
+            ax4.legend()
+            ax4.grid(True, alpha=0.3)
             for ax in (ax1, ax2, ax3, ax4):
                 annotate_crisis_periods(ax, y_position="top")
                 ax.axvline(pd.to_datetime(OOS_START_DATE), color="gray", linestyle="--", alpha=0.7)
@@ -1590,18 +1348,21 @@ def create_sg_trend_visualizations(
     slope, intercept, r_value, p_value, std_err = stats.linregress(x, yv)
     fig, ax = plt.subplots(figsize=(12, 10))
     ax.scatter(x, yv, alpha=0.7, s=80, c=rc, edgecolors="black", linewidth=0.5)
-    xl = np.linspace(x.min(), x.max(), 100); ax.plot(xl, slope*xl + intercept, color=COLOR_PALETTE["crisis"], lw=2,
-                                                     label=f"y = {slope:.2f}x + {intercept:.2f}\nR² = {r_value**2:.3f}")
+    xl = np.linspace(x.min(), x.max(), 100)
+    ax.plot(xl, slope*xl + intercept, color=COLOR_PALETTE["crisis"], lw=2, label=f"y = {slope:.2f}x + {intercept:.2f}\nR² = {r_value**2:.3f}")
     ax.plot([x.min(), x.max()], [x.min(), x.max()], "k--", alpha=0.5, label="45°")
     label_model = {"dual":"Model (Blended)","large_only":"Large Universe (Model)","small_only":"Small Universe (Model)"}.get(mode,"Model")
-    ax.set_xlabel("SG Trend Monthly Return (%)"); ax.set_ylabel(f"{label_model} Monthly Return (%)")
+    ax.set_xlabel("SG Trend Monthly Return (%)")
+    ax.set_ylabel(f"{label_model} Monthly Return (%)")
     ax.set_title(f"Monthly Scatter: {label_model} vs Benchmark (After {BURN_IN_MONTHS}-Month Burn-in)", fontsize=14, weight="bold")
-    ax.legend(loc="upper left"); ax.grid(True, alpha=0.3); ax.set_aspect("equal")
+    ax.legend(loc="upper left")
+    ax.grid(True, alpha=0.3)
+    ax.set_aspect("equal")
     patches = [Patch(color=c, label=reg.replace("_"," ").title()) for reg, c in REGIME_COLORS.items()]
-    reg_leg = ax.legend(handles=patches, loc="lower right", title="SG Trend Regime\n(Rolling Sharpe)", fontsize=8); ax.add_artist(reg_leg)
+    reg_leg = ax.legend(handles=patches, loc="lower right", title="SG Trend Regime\n(Rolling Sharpe)", fontsize=8)
+    ax.add_artist(reg_leg)
     stats_text = f"Correlation: {r_value:.3f}\nTracking Error: {(yv-x).std():.1f}%\nMean Alpha: {(yv-x).mean():.1f}%"
-    ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, bbox=dict(boxstyle="round", facecolor="white", alpha=0.8),
-            va="top", ha="left", fontsize=10)
+    ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, bbox=dict(boxstyle="round", facecolor="white", alpha=0.8), va="top", ha="left", fontsize=10)
     savefig_and_maybe_show(fig, ANALYSIS_OUT / f"C_monthly_scatter_regime_rev26{suffix}.png", show=show_plots)
 
 def run_sg_trend_validation(X_large_full, X_small_full, y_full, mode: str = "large_only"):
@@ -1609,12 +1370,7 @@ def run_sg_trend_validation(X_large_full, X_small_full, y_full, mode: str = "lar
     BURN_IN_MONTHS = 9
     OOS_START_DATE = "2021-11-01"
     TRAIN_VAL_END_DATE = pd.to_datetime(OOS_START_DATE).tz_localize('UTC') - pd.Timedelta(days=1)
-    custom_risk_config = RiskConfig(
-        instrument_vol_target=0.12,
-        portfolio_vol_target=0.12,
-        max_leverage_cap=2.0,
-        vol_halflife=40
-    )
+    custom_risk_config = RiskConfig(instrument_vol_target=0.12, portfolio_vol_target=0.12, max_leverage_cap=2.0, vol_halflife=40)
     print(f"--- SG Trend Validation | Mode: {mode.upper()} ---")
     print(f"Train/Validation ends: {TRAIN_VAL_END_DATE.date()} | OOS starts: {OOS_START_DATE}")
     print(f"Burn-in: {BURN_IN_MONTHS} months ({BURN_IN_DAYS} trading days)")
@@ -1633,16 +1389,7 @@ def run_sg_trend_validation(X_large_full, X_small_full, y_full, mode: str = "lar
     ANALYSIS_OUT.mkdir(parents=True, exist_ok=True)
     suffix = mode_suffix(mode)
     if mode == "large_only":
-        results_large = _build_single_universe(
-            X_raw=X_large_full, y=y_full,
-            lookbacks=(20,25,30,35,40), alpha_grid=None, l1_ratio=0.5,
-            risk_config=custom_risk_config, ann_bdays=252, rng_seed=42,
-            min_instruments=5, initial_training_window=756, min_history_pct=0.7,
-            blend_win=756, oos_start_date=OOS_START_DATE, oos_coefficient_window=756,
-            n_splits=5, training_window=756, min_val_window=20,
-            allow_missing_instruments=False, persist_artifacts=True, universe_name="large",
-            freeze_coefficients=False, alpha_ema=0.33, track_turnover=True
-        )
+        results_large = _build_single_universe(X_raw=X_large_full, y=y_full, lookbacks=(20,25,30,35,40), alpha_grid=None, l1_ratio=0.5, risk_config=custom_risk_config, ann_bdays=252, rng_seed=42, min_instruments=5, initial_training_window=756, min_history_pct=0.7, blend_win=756, oos_start_date=OOS_START_DATE, oos_coefficient_window=756, n_splits=5, training_window=756, min_val_window=20, allow_missing_instruments=False, persist_artifacts=True, universe_name="large", freeze_coefficients=False, alpha_ema=0.33, track_turnover=True)
         pnl_large = results_large['combined']
         benchmark = y_full.loc[pnl_large.index]
         burn_in_end_date = pnl_large.index[BURN_IN_DAYS] if len(pnl_large) > BURN_IN_DAYS else pnl_large.index[-1]
@@ -1652,38 +1399,18 @@ def run_sg_trend_validation(X_large_full, X_small_full, y_full, mode: str = "lar
         metrics_oos = calculate_detailed_metrics(pnl_large.loc[OOS_START_DATE:], benchmark.loc[OOS_START_DATE:], "OOS", apply_burnin=False)
         print("\n--- Large OOS Performance ---")
         for k, v in metrics_oos.items():
-            if k != "Period": print(f"{k}: {v:.3f}")
-        create_sg_trend_visualizations(
-            results_dual_sg=None, ret_sg=pnl_large, pnl_small=None, pnl_large=pnl_large,
-            benchmark=benchmark, burn_in_end_date=burn_in_end_date,
-            BURN_IN_DAYS=BURN_IN_DAYS, BURN_IN_MONTHS=BURN_IN_MONTHS,
-            OOS_START_DATE=OOS_START_DATE, TRAIN_VAL_END_DATE=TRAIN_VAL_END_DATE,
-            custom_risk_config=custom_risk_config, ANALYSIS_OUT=ANALYSIS_OUT, mode="large_only",
-            show_plots=SHOW_PLOTS
-        )
+            if k != "Period":
+                print(f"{k}: {v:.3f}")
+        create_sg_trend_visualizations(results_dual_sg=None, ret_sg=pnl_large, pnl_small=None, pnl_large=pnl_large, benchmark=benchmark, burn_in_end_date=burn_in_end_date, BURN_IN_DAYS=BURN_IN_DAYS, BURN_IN_MONTHS=BURN_IN_MONTHS, OOS_START_DATE=OOS_START_DATE, TRAIN_VAL_END_DATE=TRAIN_VAL_END_DATE, custom_risk_config=custom_risk_config, ANALYSIS_OUT=ANALYSIS_OUT, mode="large_only", show_plots=SHOW_PLOTS)
         try:
-            run_extended_diagnostics(
-                results=results_large, benchmark=benchmark, oos_start_date=OOS_START_DATE,
-                analysis_out=ANALYSIS_OUT, color_palette=COLOR_PALETTE, regime_colors=REGIME_COLORS,
-                mode="large_only",
-                include_persistence=False, include_alpha_stability=True, show_plots=SHOW_PLOTS
-            )
+            run_extended_diagnostics(results=results_large, benchmark=benchmark, oos_start_date=OOS_START_DATE, analysis_out=ANALYSIS_OUT, color_palette=COLOR_PALETTE, regime_colors=REGIME_COLORS, mode="large_only", include_persistence=False, include_alpha_stability=True, show_plots=SHOW_PLOTS)
         except Exception as e:
             print(f"Extended diagnostics failed: {e}")
         quality.to_csv(ANALYSIS_OUT / f"implementation_quality_rev26{suffix}.csv")
         pd.DataFrame([metrics_oos]).to_csv(ANALYSIS_OUT / f"oos_performance_rev26{suffix}.csv", index=False)
         return results_large, pnl_large
     if mode == "small_only":
-        results_small = _build_single_universe(
-            X_raw=X_small_full, y=y_full,
-            lookbacks=(20,25,30,35,40), alpha_grid=None, l1_ratio=0.5,
-            risk_config=custom_risk_config, ann_bdays=252, rng_seed=42,
-            min_instruments=5, initial_training_window=756, min_history_pct=0.7,
-            blend_win=756, oos_start_date=OOS_START_DATE, oos_coefficient_window=756,
-            n_splits=5, training_window=756, min_val_window=20,
-            allow_missing_instruments=False, persist_artifacts=True, universe_name="small",
-            freeze_coefficients=False, alpha_ema=0.33, track_turnover=True
-        )
+        results_small = _build_single_universe(X_raw=X_small_full, y=y_full, lookbacks=(20,25,30,35,40), alpha_grid=None, l1_ratio=0.5, risk_config=custom_risk_config, ann_bdays=252, rng_seed=42, min_instruments=5, initial_training_window=756, min_history_pct=0.7, blend_win=756, oos_start_date=OOS_START_DATE, oos_coefficient_window=756, n_splits=5, training_window=756, min_val_window=20, allow_missing_instruments=False, persist_artifacts=True, universe_name="small", freeze_coefficients=False, alpha_ema=0.33, track_turnover=True)
         pnl_small = results_small['combined']
         benchmark = y_full.loc[pnl_small.index]
         burn_in_end_date = pnl_small.index[BURN_IN_DAYS] if len(pnl_small) > BURN_IN_DAYS else pnl_small.index[-1]
@@ -1693,61 +1420,34 @@ def run_sg_trend_validation(X_large_full, X_small_full, y_full, mode: str = "lar
         metrics_oos = calculate_detailed_metrics(pnl_small.loc[OOS_START_DATE:], benchmark.loc[OOS_START_DATE:], "OOS", apply_burnin=False)
         print("\n--- Small OOS Performance ---")
         for k, v in metrics_oos.items():
-            if k != "Period": print(f"{k}: {v:.3f}")
-        create_sg_trend_visualizations(
-            results_dual_sg=None, ret_sg=pnl_small, pnl_small=pnl_small, pnl_large=None,
-            benchmark=benchmark, burn_in_end_date=burn_in_end_date,
-            BURN_IN_DAYS=BURN_IN_DAYS, BURN_IN_MONTHS=BURN_IN_MONTHS,
-            OOS_START_DATE=OOS_START_DATE, TRAIN_VAL_END_DATE=TRAIN_VAL_END_DATE,
-            custom_risk_config=custom_risk_config, ANALYSIS_OUT=ANALYSIS_OUT, mode="small_only",
-            show_plots=SHOW_PLOTS
-        )
+            if k != "Period":
+                print(f"{k}: {v:.3f}")
+        create_sg_trend_visualizations(results_dual_sg=None, ret_sg=pnl_small, pnl_small=pnl_small, pnl_large=None, benchmark=benchmark, burn_in_end_date=burn_in_end_date, BURN_IN_DAYS=BURN_IN_DAYS, BURN_IN_MONTHS=BURN_IN_MONTHS, OOS_START_DATE=OOS_START_DATE, TRAIN_VAL_END_DATE=TRAIN_VAL_END_DATE, custom_risk_config=custom_risk_config, ANALYSIS_OUT=ANALYSIS_OUT, mode="small_only", show_plots=SHOW_PLOTS)
         try:
-            run_extended_diagnostics(
-                results=results_small, benchmark=benchmark, oos_start_date=OOS_START_DATE,
-                analysis_out=ANALYSIS_OUT, color_palette=COLOR_PALETTE, regime_colors=REGIME_COLORS,
-                mode="small_only",
-                include_persistence=False, include_alpha_stability=True, show_plots=SHOW_PLOTS
-            )
+            run_extended_diagnostics(results=results_small, benchmark=benchmark, oos_start_date=OOS_START_DATE, analysis_out=ANALYSIS_OUT, color_palette=COLOR_PALETTE, regime_colors=REGIME_COLORS, mode="small_only", include_persistence=False, include_alpha_stability=True, show_plots=SHOW_PLOTS)
         except Exception as e:
             print(f"Extended diagnostics failed: {e}")
         quality.to_csv(ANALYSIS_OUT / f"implementation_quality_rev26{suffix}.csv")
         pd.DataFrame([metrics_oos]).to_csv(ANALYSIS_OUT / f"oos_performance_rev26{suffix}.csv", index=False)
         return results_small, pnl_small
-    results_dual = build_replica_walk_forward_dual_universe(
-        X_raw_small=X_small_full, X_raw_large=X_large_full, y=y_full,
-        lookbacks=(20,25,30,35,40), alpha_grid=None, l1_ratio=0.5,
-        risk_config=custom_risk_config, min_val_window=20, min_history_pct=0.7,
-        allow_missing_instruments=False, oos_start_date=OOS_START_DATE, oos_coefficient_window=756,
-        persist_artifacts=True, return_details=True, freeze_coefficients=False, alpha_ema=0.33,
-        track_turnover=True, rebal_freq="Q"
-    )
+    results_dual = build_replica_walk_forward_dual_universe(X_raw_small=X_small_full, X_raw_large=X_large_full, y=y_full, lookbacks=(20,25,30,35,40), alpha_grid=None, l1_ratio=0.5, risk_config=custom_risk_config, min_val_window=20, min_history_pct=0.7, allow_missing_instruments=False, oos_start_date=OOS_START_DATE, oos_coefficient_window=756, persist_artifacts=True, return_details=True, freeze_coefficients=False, alpha_ema=0.33, track_turnover=True, rebal_freq="Q")
     ret_sg = results_dual['combined']
     pnl_small = results_dual['small_results']['combined']
     pnl_large = results_dual['large_results']['combined']
     benchmark = y_full.loc[ret_sg.index]
     burn_in_end_date = ret_sg.index[BURN_IN_DAYS] if len(ret_sg) > BURN_IN_DAYS else ret_sg.index[-1]
-    (results_dual['blend_weights'].to_frame('w_small')
-        .to_csv(ANALYSIS_OUT / "dynamic_blend_weights_rev26.csv"))
+    (results_dual['blend_weights'].to_frame('w_small').to_csv(ANALYSIS_OUT / "dynamic_blend_weights_rev26.csv"))
     quality = monitor_implementation_quality(results_dual, y_full)
     print("\n--- Implementation Quality (Dual) ---")
     print(quality)
     metrics_oos = calculate_detailed_metrics(ret_sg.loc[OOS_START_DATE:], benchmark.loc[OOS_START_DATE:], "OOS", apply_burnin=False)
     print("\n--- OOS Performance (Blended) ---")
     for k, v in metrics_oos.items():
-        if k != "Period": print(f"{k}: {v:.3f}")
-    create_sg_trend_visualizations(
-        results_dual, ret_sg, pnl_small, pnl_large, benchmark, burn_in_end_date,
-        BURN_IN_DAYS, BURN_IN_MONTHS, OOS_START_DATE, TRAIN_VAL_END_DATE,
-        custom_risk_config, ANALYSIS_OUT, mode="dual", show_plots=SHOW_PLOTS
-    )
+        if k != "Period":
+            print(f"{k}: {v:.3f}")
+    create_sg_trend_visualizations(results_dual, ret_sg, pnl_small, pnl_large, benchmark, burn_in_end_date, BURN_IN_DAYS, BURN_IN_MONTHS, OOS_START_DATE, TRAIN_VAL_END_DATE, custom_risk_config, ANALYSIS_OUT, mode="dual", show_plots=SHOW_PLOTS)
     try:
-        run_extended_diagnostics(
-            results=results_dual, benchmark=benchmark, oos_start_date=OOS_START_DATE,
-            analysis_out=ANALYSIS_OUT, color_palette=COLOR_PALETTE, regime_colors=REGIME_COLORS,
-            mode="dual",
-            include_persistence=False, include_alpha_stability=True, show_plots=SHOW_PLOTS
-        )
+        run_extended_diagnostics(results=results_dual, benchmark=benchmark, oos_start_date=OOS_START_DATE, analysis_out=ANALYSIS_OUT, color_palette=COLOR_PALETTE, regime_colors=REGIME_COLORS, mode="dual", include_persistence=False, include_alpha_stability=True, show_plots=SHOW_PLOTS)
     except Exception as e:
         print(f"Extended diagnostics failed: {e}")
     quality.to_csv(ANALYSIS_OUT / f"implementation_quality_rev26{mode_suffix('dual')}.csv")
@@ -1761,7 +1461,8 @@ def create_exposure_visualizations(small_exp, large_exp, combined_fixed, all_ass
     suffix = mode_suffix(mode)
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     ax1 = axes[0, 0]
-    x = np.arange(len(all_asset_classes)); width = 0.25
+    x = np.arange(len(all_asset_classes))
+    width = 0.25
     if small_exp is not None:
         small_avg = small_exp.mean().reindex(all_asset_classes, fill_value=0)
         ax1.bar(x - width, small_avg, width, label='Small', alpha=0.8, color=COLOR_PALETTE.get('small'))
@@ -1771,15 +1472,25 @@ def create_exposure_visualizations(small_exp, large_exp, combined_fixed, all_ass
     if combined_fixed is not None:
         comb_avg = combined_fixed.mean().reindex(all_asset_classes, fill_value=0)
         ax1.bar(x + width, comb_avg, width, label='Combined', alpha=0.8, color=COLOR_PALETTE.get('blended'))
-    ax1.set_xlabel('Asset Class'); ax1.set_ylabel('Average Exposure'); ax1.set_title('Average Exposures by Universe')
-    ax1.set_xticks(x); ax1.set_xticklabels(all_asset_classes, rotation=45); ax1.legend(); ax1.grid(True, alpha=0.3); ax1.axhline(0, color='black', linewidth=0.5)
+    ax1.set_xlabel('Asset Class')
+    ax1.set_ylabel('Average Exposure')
+    ax1.set_title('Average Exposures by Universe')
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(all_asset_classes, rotation=45)
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    ax1.axhline(0, color='black', linewidth=0.5)
     ax2 = axes[0, 1]
     if combined_fixed is not None:
         for col in combined_fixed.columns:
             if combined_fixed[col].abs().mean() > 0.001:
                 ax2.plot(combined_fixed.index, combined_fixed[col], label=col, alpha=0.8, linewidth=1.5)
-    ax2.set_title('Combined — Exposure Evolution'); ax2.set_xlabel('Date'); ax2.set_ylabel('Exposure')
-    ax2.legend(loc='center left', bbox_to_anchor=(1, 0.5)); ax2.grid(True, alpha=0.3); ax2.axhline(0, color='black', linewidth=0.5)
+    ax2.set_title('Combined — Exposure Evolution')
+    ax2.set_xlabel('Date')
+    ax2.set_ylabel('Exposure')
+    ax2.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+    ax2.grid(True, alpha=0.3)
+    ax2.axhline(0, color='black', linewidth=0.5)
     ax3 = axes[1, 0]
     if combined_fixed is not None:
         current_date = combined_fixed.index[-1]
@@ -1791,9 +1502,16 @@ def create_exposure_visualizations(small_exp, large_exp, combined_fixed, all_ass
             current_large = large_exp.iloc[-1].reindex(all_asset_classes, fill_value=0)
             ax3.bar(x, current_large, width, label='Large', alpha=0.8, color=COLOR_PALETTE.get('large'))
         ax3.bar(x + width, current_combined.reindex(all_asset_classes, fill_value=0), width, label='Combined', alpha=0.8, color=COLOR_PALETTE.get('blended'))
-        ax3.set_xlabel('Asset Class'); ax3.set_ylabel('Current Exposure'); ax3.set_title(f'Current Exposures ({current_date.date()})')
-        ax3.set_xticks(x); ax3.set_xticklabels(all_asset_classes, rotation=45); ax3.legend(); ax3.grid(True, alpha=0.3); ax3.axhline(0, color='black', linewidth=0.5)
-    ax4 = axes[1, 1]; ax4.axis('off')
+        ax3.set_xlabel('Asset Class')
+        ax3.set_ylabel('Current Exposure')
+        ax3.set_title(f'Current Exposures ({current_date.date()})')
+        ax3.set_xticks(x)
+        ax3.set_xticklabels(all_asset_classes, rotation=45)
+        ax3.legend()
+        ax3.grid(True, alpha=0.3)
+        ax3.axhline(0, color='black', linewidth=0.5)
+    ax4 = axes[1, 1]
+    ax4.axis('off')
     if combined_fixed is not None:
         summary = f"""EXPOSURE SUMMARY
 
@@ -1809,20 +1527,27 @@ Current Allocation:"""
                 if abs(v) > 0.001:
                     summary += f"\n• {ac}: {v:+.1%}"
         summary += "\n\nKey: dynamic universe blend; risk-managed exposures"
-        ax4.text(0.1, 0.9, summary, transform=ax4.transAxes, fontsize=11,
-                 va='top', fontfamily='monospace', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        ax4.text(0.1, 0.9, summary, transform=ax4.transAxes, fontsize=11, va='top', fontfamily='monospace', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
     savefig_and_maybe_show(fig, exposure_dir / f"asset_exposures_summary_rev26{suffix}.png", show=show_plots)
     if combined_fixed is not None:
         fig, ax = plt.subplots(figsize=(12, 6))
         monthly = combined_fixed.resample('M').mean()
-        active_classes = [c for c in monthly.columns if monthly[c].abs().mean() > 0.001]
-        monthly = monthly[active_classes]
-        im = ax.imshow(monthly.T, aspect='auto', cmap='RdBu_r', vmin=-0.4, vmax=0.4, interpolation='nearest')
-        ax.set_yticks(range(len(active_classes))); ax.set_yticklabels(active_classes)
-        n = len(monthly); step = max(1, n // 15); idxs = range(0, n, step)
-        ax.set_xticks(list(idxs)); ax.set_xticklabels([monthly.index[i].strftime('%Y-%m') for i in idxs], rotation=45, ha='right')
+        renamed_cols = ['Commodities' if str(c).upper() in {'ENERGY','METALS'} else str(c) for c in monthly.columns]
+        monthly.columns = renamed_cols
+        monthly_agg = monthly.groupby(axis=1, level=0).sum()
+        active_classes = [c for c in monthly_agg.columns if monthly_agg[c].abs().mean() > 0.001]
+        monthly_agg = monthly_agg[active_classes]
+        im = ax.imshow(monthly_agg.T, aspect='auto', cmap='RdBu_r', vmin=-0.4, vmax=0.4, interpolation='nearest')
+        ax.set_yticks(range(len(active_classes)))
+        ax.set_yticklabels(active_classes)
+        n = len(monthly_agg)
+        step = max(1, n // 15)
+        idxs = range(0, n, step)
+        ax.set_xticks(list(idxs))
+        ax.set_xticklabels([monthly_agg.index[i].strftime('%Y-%m') for i in idxs], rotation=45, ha='right')
         ax.set_title('Combined — Monthly Avg Exposures Heatmap', fontsize=12, weight='bold')
-        ax.set_xlabel('Date'); ax.set_ylabel('Asset Class')
+        ax.set_xlabel('Date')
+        ax.set_ylabel('Asset Class')
         cb = plt.colorbar(im, ax=ax, label='Avg Monthly Exposure')
         savefig_and_maybe_show(fig, exposure_dir / f"asset_exposures_heatmap_fixed_rev26{suffix}.png", show=show_plots)
 
@@ -1842,22 +1567,31 @@ def analyze_exposures(results_dual_sg, X_large_full, X_small_full, ret_sg, mode:
         print("No instrument config found — building quick mapping")
         def guess_asset_class(instrument):
             inst_upper = str(instrument).upper()
-            direct = {'CRUDE_W':'Energy','SP500':'Equity','S&P500':'Equity','TOPIX':'Equity',
-                      'US5':'Bond','US5Y':'Bond','US10':'Bond','US10Y':'Bond','US2':'Bond','US2Y':'Bond'}
-            if inst_upper in direct: return direct[inst_upper]
-            if any(x in inst_upper for x in ['CRUDE','OIL','BRENT','WTI','CL','NG','GASOIL','HO','RB']): return 'Energy'
-            if any(x in inst_upper for x in ['CORN','WHEAT','SOYBEAN','SUGAR','COFFEE','COCOA','COTTON']): return 'Ags'
-            if any(x in inst_upper for x in ['GOLD','SILVER','COPPER','ALUMINUM','PLATINUM','PALLADIUM']): return 'Metals'
-            if any(x in inst_upper for x in ['CATTLE','HOGS','LC','LH','FC']): return 'Livestock'
-            if any(x in inst_upper for x in ['EUR','GBP','JPY','CHF','AUD','CAD','NZD']) and len(inst_upper) <= 6 and not any(x in inst_upper for x in ['BOND','RATE']): return 'FX'
-            if inst_upper.startswith('US') and any(char.isdigit() for char in inst_upper): return 'Bond'
-            if any(x in inst_upper for x in ['BOBL','BUND','BOND','RATE']): return 'Bond'
-            if any(x in inst_upper for x in ['ES','NQ','NASDAQ','DOW','FTSE','DAX','EUROSTOXX']): return 'Equity'
+            direct = {'CRUDE_W':'Energy','SP500':'Equity','S&P500':'Equity','TOPIX':'Equity','US5':'Bond','US5Y':'Bond','US10':'Bond','US10Y':'Bond'}
+            if inst_upper in direct:
+                return direct[inst_upper]
+            if any(x in inst_upper for x in ['CRUDE','OIL','BRENT','WTI','CL','NG','GASOIL','HO','RB']):
+                return 'Energy'
+            if any(x in inst_upper for x in ['CORN','WHEAT','SOYBEAN','SUGAR','COFFEE','COCOA','COTTON']):
+                return 'Ags'
+            if any(x in inst_upper for x in ['GOLD','SILVER','COPPER','ALUMINUM','PLATINUM','PALLADIUM']):
+                return 'Metals'
+            if any(x in inst_upper for x in ['CATTLE','HOGS','LC','LH','FC']):
+                return 'Livestock'
+            if any(x in inst_upper for x in ['EUR','GBP','JPY','CHF','AUD','CAD','NZD']) and len(inst_upper) <= 6 and not any(x in inst_upper for x in ['BOND','RATE']):
+                return 'FX'
+            if inst_upper.startswith('US') and any(char.isdigit() for char in inst_upper):
+                return 'Bond'
+            if any(x in inst_upper for x in ['BOBL','BUND','BOND','RATE']):
+                return 'Bond'
+            if any(x in inst_upper for x in ['ES','NQ','NASDAQ','DOW','FTSE','DAX','EUROSTOXX']):
+                return 'Equity'
             return 'Other'
         inst_config = pd.DataFrame({'AssetClass': {inst: guess_asset_class(inst) for inst in all_instruments}})
     weight_files_small = list(WEIGHT_HISTORY_DIR.glob("weights_small_w*.parquet")) if X_small_full is not None else []
     weight_files_large = list(WEIGHT_HISTORY_DIR.glob("weights_large_w*.parquet"))
-    small_exp = None; large_exp = None
+    small_exp = None
+    large_exp = None
     if not weight_files_small and not weight_files_large:
         print("No weight history — creating simple equal-weight exposures by asset class")
         dates = ret_sg.index
@@ -1867,21 +1601,24 @@ def analyze_exposures(results_dual_sg, X_large_full, X_small_full, ret_sg, mode:
             unique_small_ac = sorted(set(small_asset_classes))
             small_exp = pd.DataFrame(0.0, index=dates, columns=unique_small_ac)
             for i, inst in enumerate(small_instruments):
-                ac = small_asset_classes[i]; small_exp[ac] += 1.0 / len(small_instruments)
+                ac = small_asset_classes[i]
+                small_exp[ac] += 1.0 / len(small_instruments)
         if X_large_full is not None:
             large_instruments = _non_ag_cols(list(X_large_full.columns))
             large_asset_classes = [inst_config.loc[i, 'AssetClass'] if i in inst_config.index else 'Other' for i in large_instruments]
             unique_large_ac = sorted(set(large_asset_classes))
             large_exp = pd.DataFrame(0.0, index=dates, columns=unique_large_ac)
             for i, inst in enumerate(large_instruments):
-                ac = large_asset_classes[i]; large_exp[ac] += 1.0 / len(large_instruments)
+                ac = large_asset_classes[i]
+                large_exp[ac] += 1.0 / len(large_instruments)
     else:
         print("Loading weight history for exposures")
         if weight_files_small:
             small_weights = []
             for w in [20,25,30,35,40]:
                 wf = WEIGHT_HISTORY_DIR / f"weights_small_w{w}.parquet"
-                if wf.exists(): small_weights.append(pd.read_parquet(wf))
+                if wf.exists():
+                    small_weights.append(pd.read_parquet(wf))
             if small_weights:
                 small_avg = sum(small_weights) / len(small_weights)
                 small_avg = small_avg[_non_ag_cols(list(small_avg.columns))]
@@ -1895,7 +1632,8 @@ def analyze_exposures(results_dual_sg, X_large_full, X_small_full, ret_sg, mode:
             large_weights = []
             for w in [20,25,30,35,40]:
                 wf = WEIGHT_HISTORY_DIR / f"weights_large_w{w}.parquet"
-                if wf.exists(): large_weights.append(pd.read_parquet(wf))
+                if wf.exists():
+                    large_weights.append(pd.read_parquet(wf))
             if large_weights:
                 large_avg = sum(large_weights) / len(large_weights)
                 large_avg = large_avg[_non_ag_cols(list(large_avg.columns))]
@@ -1916,7 +1654,8 @@ def analyze_exposures(results_dual_sg, X_large_full, X_small_full, ret_sg, mode:
     elif large_exp is not None:
         all_ac = list(large_exp.columns)
     else:
-        print("No exposures computed — skipping charts"); return
+        print("No exposures computed — skipping charts")
+        return
     blend_path = RB_DIR / "dynamic_blend_weights_rev26.csv"
     if blend_path.exists() and (small_exp is not None and large_exp is not None):
         blend = pd.read_csv(blend_path, index_col=0, parse_dates=True).squeeze("columns")
@@ -1928,7 +1667,8 @@ def analyze_exposures(results_dual_sg, X_large_full, X_small_full, ret_sg, mode:
         common_dates = small_al.index.intersection(large_al.index).intersection(blend.index)
         combined_fixed = pd.DataFrame(index=common_dates, columns=all_ac, dtype=float)
         for dt in common_dates:
-            ws = float(blend.loc[dt]); wl = 1.0 - ws
+            ws = float(blend.loc[dt])
+            wl = 1.0 - ws
             combined_fixed.loc[dt] = small_al.loc[dt]*ws + large_al.loc[dt]*wl
     else:
         combined_fixed = large_exp if large_exp is not None else small_exp
@@ -1939,18 +1679,15 @@ def analyze_exposures(results_dual_sg, X_large_full, X_small_full, ret_sg, mode:
     print("Files saved to:", exposure_dir)
 
 def _rb_rename_shim():
-    rename_map = {
-        "implementation_quality_large_only_rev26.csv": "implementation_quality_rev26_large_only.csv",
-        "implementation_quality_small_only_rev26.csv": "implementation_quality_rev26_small_only.csv",
-        "implementation_quality_rev26.csv":           "implementation_quality_rev26_dual.csv",
-        "J_monthly_scatter_regime_rev26.png":         None,
-    }
+    rename_map = {"implementation_quality_large_only_rev26.csv": "implementation_quality_rev26_large_only.csv", "implementation_quality_small_only_rev26.csv": "implementation_quality_rev26_small_only.csv", "implementation_quality_rev26.csv": "implementation_quality_rev26_dual.csv", "J_monthly_scatter_regime_rev26.png": None}
     for old, new in rename_map.items():
         p_old = RB_DIR / old
         if p_old.exists():
             if new is None:
-                try: p_old.unlink(missing_ok=True)
-                except TypeError: p_old.unlink()
+                try:
+                    p_old.unlink(missing_ok=True)
+                except TypeError:
+                    p_old.unlink()
             else:
                 p_new = RB_DIR / new
                 if not p_new.exists():
@@ -2015,21 +1752,4 @@ def run():
 if __name__ == "__main__":
     run()
 
-__all__ = [
-    'run',
-    'process_sg_trend_data',
-    'process_futures_data',
-    'build_panel',
-    'create_large_universe',
-    'create_small_universe',
-    'create_instrument_config',
-    'build_replica_walk_forward_dual_universe',
-    'run_sg_trend_validation',
-    'analyze_exposures',
-    'monitor_implementation_quality',
-    'analyze_persistence_usage',
-    'RiskConfig',
-    'DEFAULT_RISK_CONFIG',
-    'run_extended_diagnostics',
-    'compute_drawdown_attribution',
-]
+__all__ = ['run','process_sg_trend_data','process_futures_data','build_panel','create_large_universe','create_small_universe','create_instrument_config','build_replica_walk_forward_dual_universe','run_sg_trend_validation','analyze_exposures','monitor_implementation_quality','analyze_persistence_usage','RiskConfig','DEFAULT_RISK_CONFIG','run_extended_diagnostics','compute_drawdown_attribution']

@@ -1424,13 +1424,21 @@ def create_exposure_visualizations(small_exp, large_exp, combined_fixed, all_ass
     savefig_and_maybe_show(fig, exposure_dir / f"asset_exposures_summary_rev26{suffix}.png", show=show_plots)
     if combined_fixed is not None:
         fig, ax = plt.subplots(figsize=(12, 6))
+        group_map = {'BOND': 'Bond', 'BONDS': 'Bond', 'EQUITY': 'Equity', 'EQUITIES': 'Equity', 'FX': 'FX', 'CURRENCIES': 'FX', 'ENERGY': 'Commodities', 'METALS': 'Commodities', 'COMMODITIES': 'Commodities', 'AGS': 'Commodities', 'LIVESTOCK': 'Commodities'}
         monthly = combined_fixed.resample('M').mean()
-        active_classes = [c for c in monthly.columns if monthly[c].abs().mean() > 0.001]
-        monthly = monthly[active_classes]
-        im = ax.imshow(monthly.T, aspect='auto', cmap='RdBu_r', vmin=-0.4, vmax=0.4, interpolation='nearest')
-        ax.set_yticks(range(len(active_classes))); ax.set_yticklabels(active_classes)
-        n = len(monthly); step = max(1, n // 15); idxs = range(0, n, step)
-        ax.set_xticks(list(idxs)); ax.set_xticklabels([monthly.index[i].strftime('%Y-%m') for i in idxs], rotation=45, ha='right')
+        renamed = monthly.copy()
+        renamed.columns = [group_map.get(str(c).upper(), str(c)) for c in renamed.columns]
+        monthly_agg = renamed.groupby(axis=1, level=0).sum()
+        keep = ['Bond', 'Equity', 'FX', 'Commodities']
+        active = [c for c in keep if c in monthly_agg.columns and monthly_agg[c].abs().mean() > 0.001]
+        monthly_agg = monthly_agg[active]
+        im = ax.imshow(monthly_agg.T, aspect='auto', cmap='RdBu_r', vmin=-0.4, vmax=0.4, interpolation='nearest')
+        ax.set_yticks(range(len(active))); ax.set_yticklabels(active)
+        n = len(monthly_agg)
+        step = max(1, n // 15)
+        idxs = range(0, n, step)
+        ax.set_xticks(list(idxs))
+        ax.set_xticklabels([monthly_agg.index[i].strftime('%Y-%m') for i in idxs], rotation=45, ha='right')
         ax.set_title('Combined — Monthly Avg Exposures Heatmap', fontsize=12, weight='bold')
         ax.set_xlabel('Date'); ax.set_ylabel('Asset Class')
         cb = plt.colorbar(im, ax=ax, label='Avg Monthly Exposure')
