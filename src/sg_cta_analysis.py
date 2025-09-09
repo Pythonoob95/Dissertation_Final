@@ -622,16 +622,22 @@ def run_extended_diagnostics(results, benchmark, oos_start_date, analysis_out: P
             beta_hist = results.get('beta_history', None)
         if beta_hist is not None and not beta_hist.empty:
             beta_no_inter = beta_hist.drop(columns=['intercept'], errors='ignore')
-            denom = beta_no_inter.sum(axis=1).replace(0, np.nan)
-            beta_norm = beta_no_inter.div(denom, axis=0).fillna(0.0)
+            contrib = beta_no_inter.abs().fillna(0.0)
+            denom = contrib.sum(axis=1).replace(0, np.nan)
+            beta_norm = contrib.div(denom, axis=0).fillna(0.0)
+            order = beta_norm.mean().sort_values(ascending=False).index.tolist()
+            beta_norm = beta_norm[order]
             fig, ax = plt.subplots(figsize=(14, 6))
             cols = list(beta_norm.columns)
-            ax.stackplot(beta_norm.index, [beta_norm[c] for c in cols], labels=[f'{c}d' for c in cols], alpha=0.85)
+            ax.stackplot(beta_norm.index, [beta_norm[c].values for c in cols], labels=[f'{c}d' for c in cols], alpha=0.85, linewidth=0.6)
             ax.set_title('Evolution of Lookback Blend Weights', fontsize=14, weight='bold')
             ax.set_ylabel('Normalized Weight'); ax.set_xlabel('Date'); ax.set_ylim(0, 1)
             ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1)); ax.grid(True, alpha=0.3)
             if oos_start_date:
                 ax.axvline(pd.to_datetime(oos_start_date), color='black', linestyle='--', alpha=0.7, linewidth=2)
+            beta_no_inter.to_csv(analysis_out / "E_lookback_blend_weights_raw_rev26.csv")
+            denom.rename("sum_abs_weights").to_frame().to_csv(analysis_out / "E_lookback_blend_weights_denominator_rev26.csv")
+            beta_norm.to_csv(analysis_out / "E_lookback_blend_weights_rev26.csv")
             savefig_and_maybe_show(fig, analysis_out / "E_lookback_blend_weights_rev26.png", show=show_plots)
         else:
             print("E skipped — no beta_history available.")
@@ -790,6 +796,7 @@ def run_extended_diagnostics(results, benchmark, oos_start_date, analysis_out: P
             ax.set_title('Lookback Contribution to Alpha (monthly sum)', fontsize=14, weight='bold')
             ax.set_ylabel('Alpha (monthly sum of daily residual)'); ax.set_xlabel('Date'); ax.grid(True, alpha=0.3)
             ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1))
+            monthly.to_csv(analysis_out / f"RB_lookback_alpha_contribution_rev26{mode_suffix(mode)}.csv")
             savefig_and_maybe_show(fig, analysis_out / f"RB_lookback_alpha_contribution_rev26{mode_suffix(mode)}.png", show=show_plots)
         else:
             print("RB Extra: no predictions_per_model — skipped.")

@@ -1153,23 +1153,33 @@ def run_extended_diagnostics(
             print("No turnover metrics found.")
     except Exception as e:
         print(f"Turnover diagnostics failed: {e}")
+
     try:
         print("\n=== EXT — Lookback Model Blend Weights ===")
         beta_hist = results.get('beta_history', None)
         if beta_hist is not None and not beta_hist.empty:
             beta_no_inter = beta_hist.drop(columns=['intercept'], errors='ignore')
-            denom = beta_no_inter.sum(axis=1).replace(0, np.nan)
-            beta_norm = beta_no_inter.div(denom, axis=0).fillna(0.0)
+            contrib = beta_no_inter.abs().fillna(0.0)
+            denom = contrib.sum(axis=1).replace(0, np.nan)
+            beta_norm = contrib.div(denom, axis=0).fillna(0.0)
+            order = beta_norm.mean().sort_values(ascending=False).index.tolist()
+            beta_norm = beta_norm[order]
             fig, ax = plt.subplots(figsize=(14, 6))
-            cols = list(beta_norm.columns)
             idx = _index_to_naive(beta_norm.index)
-            ax.stackplot(idx, [beta_norm[c].values for c in cols],
-                         labels=[f'{c}d' for c in cols], alpha=0.85)
+            ax.stackplot(idx, [beta_norm[c].values for c in beta_norm.columns],
+                         labels=[f'{c}d' for c in beta_norm.columns], alpha=0.85, linewidth=0.6)
             ax.set_title('Evolution of Lookback Blend Weights (Returns-based)', fontsize=14, weight='bold')
-            ax.set_ylabel('Normalized Weight'); ax.set_xlabel('Date'); ax.set_ylim(0, 1)
-            ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1)); ax.grid(True, alpha=0.3)
+            ax.set_ylabel('Normalized Weight');
+            ax.set_xlabel('Date');
+            ax.set_ylim(0, 1)
+            ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1));
+            ax.grid(True, alpha=0.3)
             if oos_start_date:
                 ax.axvline(to_naive(oos_start_date), color='black', linestyle='--', alpha=0.7, linewidth=2)
+            beta_no_inter.to_csv(analysis_out / f"E_lookback_blend_weights_raw_{suffix}.csv")
+            denom.rename("sum_abs_weights").to_frame().to_csv(
+                analysis_out / f"E_lookback_blend_weights_denominator_{suffix}.csv")
+            beta_norm.to_csv(analysis_out / f"E_lookback_blend_weights_{suffix}.csv")
             savefig_and_maybe_show(fig, analysis_out / f"E_lookback_blend_weights_{suffix}.png", show=show_plots)
         else:
             print("No beta_history available.")
@@ -1307,32 +1317,74 @@ def run_extended_diagnostics(
             ax.set_title('Lookback Contribution to Alpha (monthly sum) — Returns-based', fontsize=14, weight='bold')
             ax.set_ylabel('Alpha (monthly sum of daily residual)'); ax.set_xlabel('Date'); ax.grid(True, alpha=0.3)
             ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1))
+            monthly.to_csv(analysis_out / f"RB_lookback_alpha_contribution_{suffix}.csv")
             savefig_and_maybe_show(fig, analysis_out / f"RB_lookback_alpha_contribution_{suffix}.png", show=show_plots)
         else:
             print("No predictions_per_model — skipped alpha contribution.")
     except Exception as e:
         print(f"Alpha contribution failed: {e}")
-    try:
-        print("\n=== EXT — Gross Exposure by Lookback (NO combined line) ===")
-        weight_paths = results.get('weight_history_paths', {})
-        if not weight_paths:
-            print("No weight history paths available; exposures chart skipped.")
-        else:
-            fig, ax = plt.subplots(figsize=(14, 6))
-            for w in sorted(weight_paths):
-                dfw = pd.read_parquet(weight_paths[w]).astype('float32')
-                gross = dfw.abs().sum(axis=1).astype('float32')
-                ax.plot(_index_to_naive(gross.index), gross.values, lw=1.3, label=f'{w}d')
-            ax.set_title('Gross Exposure by Lookback — Returns-based (Large Only)', fontsize=14, weight='bold')
-            ax.set_ylabel('Σ |weights|'); ax.set_xlabel('Date'); ax.grid(True, alpha=0.3)
-            if oos_start_date:
-                ax.axvline(to_naive(oos_start_date), color='gray', linestyle='--', alpha=0.7)
-            annotate_crisis_periods(ax)
-            ax.legend(ncol=3, fontsize=9)
-            savefig_and_maybe_show(fig, analysis_out / f"J_exposures_by_lookback_{suffix}.png", show=show_plots)
-    except Exception as e:
-        print(f"Exposures plot failed: {e}")
     print("\nExtended diagnostics complete.")
+
+def create_exposure_visualizations(results: dict, out_dir: Path = RB_DIR, show_plots: bool = SHOW_PLOTS):
+    paths = results.get('weight_history_paths', {})
+    if not paths:
+        return
+    dfs = []
+    for w in sorted(paths):
+        try:
+            dfs.append(pd.read_parquet(paths[w]).astype('float32'))
+        except Exception:
+            pass
+    if not dfs:
+        return
+    weights = sum(dfs) / len(dfs)
+    def guess_asset_class(name: str) -> str:
+        u = str(name).upper()
+        if any(x in u for x in ['AUD','CAD','CHF','EUR','GBP','JPY','NZD','MXN','SEK','NOK']):
+            return 'FX'
+        if any(x in u for x in ['US2','US5','US10','TU','FV','TY','BOBL','BUND','BTP','GILT','JGB','BOND','RATE']):
+            return 'Bond'
+        if any(x in u for x in ['S&P','SP500','ES','NASDAQ','NQ','DOW','YM','EUROSTOXX','SX5E','FESX','DAX','FDAX','FTSE','TOPIX','TPX','HSI','HANGSENG']):
+            return 'Equity'
+        if any(x in u for x in ['CRUDE','WTI','BRENT','GASOIL','HO','RB','OIL']):
+            return 'Energy'
+        if any(x in u for x in ['GOLD','SILVER','COPPER','GC','SI','HG']):
+            return 'Metals'
+        return 'Other'
+    cols = list(weights.columns)
+    cls_map = {c: guess_asset_class(c) for c in cols}
+    classes = ['Bond','Equity','FX','Energy','Metals']
+    expo = pd.DataFrame(0.0, index=weights.index, columns=classes)
+    for c in cols:
+        cl = cls_map.get(c, 'Other')
+        if cl in expo.columns:
+            expo[cl] = expo[cl].add(weights[c], fill_value=0.0)
+    group_map = {'BOND':'Bond','BONDS':'Bond','EQUITY':'Equity','EQUITIES':'Equity','FX':'FX','CURRENCIES':'FX','ENERGY':'Commodities','METALS':'Commodities','COMMODITIES':'Commodities','AGS':'Commodities','LIVESTOCK':'Commodities'}
+    monthly = expo.resample('M').mean()
+    renamed = monthly.copy()
+    renamed.columns = [group_map.get(str(c).upper(), str(c)) for c in renamed.columns]
+    monthly_agg = renamed.groupby(axis=1, level=0).sum()
+    keep = ['Bond','Equity','FX','Commodities']
+    active = [c for c in keep if c in monthly_agg.columns and monthly_agg[c].abs().mean() > 0.001]
+    if not active:
+        return
+    monthly_agg = monthly_agg[active]
+    out_dir = Path(out_dir) / "asset_class_exposures"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(12, 6))
+    im = ax.imshow(monthly_agg.T, aspect='auto', cmap='RdBu_r', vmin=-0.4, vmax=0.4, interpolation='nearest')
+    ax.set_yticks(range(len(active)))
+    ax.set_yticklabels(active)
+    n = len(monthly_agg)
+    step = max(1, n // 15)
+    idxs = range(0, n, step)
+    ax.set_xticks(list(idxs))
+    ax.set_xticklabels([monthly_agg.index[i].strftime('%Y-%m') for i in idxs], rotation=45, ha='right')
+    ax.set_title('Combined — Monthly Avg Exposures Heatmap', fontsize=12, weight='bold')
+    ax.set_xlabel('Date')
+    ax.set_ylabel('Asset Class')
+    plt.colorbar(im, ax=ax, label='Avg Monthly Exposure')
+    savefig_and_maybe_show(fig, out_dir / f"asset_exposures_heatmap_fixed_{SUFFIX}.png", show=show_plots)
 
 def run_btop50_validation_large_only(X_large_full: pd.DataFrame, y_full: pd.Series):
     BURN_IN_DAYS = 189
@@ -1389,6 +1441,7 @@ def run_btop50_validation_large_only(X_large_full: pd.DataFrame, y_full: pd.Seri
         )
     except Exception as e:
         print(f"Extended diagnostics failed: {e}")
+    create_exposure_visualizations(results_large, out_dir=RB_DIR, show_plots=SHOW_PLOTS)
     return results_large, pnl_large
 
 def run():

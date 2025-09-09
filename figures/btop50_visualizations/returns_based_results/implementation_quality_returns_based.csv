@@ -1,9 +1,9 @@
 ,Value
-Sharpe (Model),0.5462775596917909
+Sharpe (Model),0.5462775320988268
 Correlation with BTOP50,0.6367672038849662
 Tracking Error (vs BTOP50),0.05429434608870916
-Autocorrelation (1d),0.09049050734078402
-Autocorrelation (5d),0.002177786358580054
+Autocorrelation (1d),0.090490507340784
+Autocorrelation (5d),0.00217778635858005
 Max Drawdown,-0.23910871520638466
 Hit Rate,0.540750760906324
 Instrument Vol Target,0.12
