@@ -956,6 +956,37 @@ def make_rev26h_style_figures_process(rep: pd.Series, y: pd.Series, beta_daily: 
     except Exception as e:
         print(f"REV-26h visuals failed: {e}")
 
+def make_asset_class_monthly_heatmap_from_contrib(rolling_ac: pd.DataFrame):
+    monthly = rolling_ac.resample("M").mean()
+    if "Energy" in monthly.columns or "Metals" in monthly.columns:
+        monthly = monthly.copy()
+        monthly["Commodities"] = monthly.get("Energy", 0.0) + monthly.get("Metals", 0.0)
+        monthly = monthly.drop(columns=[c for c in ["Energy","Metals"] if c in monthly.columns])
+    rb_order = ["Bond", "Equity", "FX", "Commodities"]
+    ordered = [c for c in rb_order if c in monthly.columns] + [c for c in monthly.columns if c not in rb_order]
+    monthly = monthly[ordered]
+    data = monthly.T
+    fig, ax = plt.subplots(figsize=(12, 6))
+    im = ax.imshow(data, aspect="auto", cmap="RdBu_r", vmin=-0.4, vmax=0.4)
+    ax.set_yticks(range(len(data.index)))
+    ax.set_yticklabels(data.index)
+    step = max(1, len(data.columns)//15) if len(data.columns) else 1
+    xticks = range(0, len(data.columns), step)
+    ax.set_xticks(list(xticks))
+    ax.set_xticklabels([data.columns[i].strftime("%Y-%m") for i in xticks], rotation=45, ha="right")
+    ax.set_title("Monthly Avg Asset-Class Contribution Heatmap", fontsize=12, weight="bold")
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Asset Class")
+    plt.colorbar(im, ax=ax, label="Contribution")
+    plt.tight_layout()
+    outpath = VIZ_DIR / "asset_exposures_heatmap_from_contrib_process_v6_btop50.png"
+    plt.savefig(outpath, bbox_inches="tight")
+    if SHOW_FIGS:
+        plt.show()
+    plt.close(fig)
+    print("Saved heatmap from rolling contributions →", outpath)
+
+
 def make_rev26h_extras(rep: pd.Series, y: pd.Series, scale: pd.Series, beta_daily: pd.DataFrame, R_eff: pd.DataFrame):
     VIZ_DIR.mkdir(parents=True, exist_ok=True)
     start = max(rep.first_valid_index(), y.first_valid_index())
@@ -1009,7 +1040,7 @@ def export_turnover_by_lookback(W: pd.DataFrame):
     print(pretty.to_string(index=False, formatters={"mean_daily": "{:.4f}%".format, "std_daily": "{:.6f}".format, "annual": "{:.2f}%".format}))
     fig, ax = plt.subplots(figsize=(14, 8))
     xs = np.arange(len(summary))
-    ax.bar(xs, 100.0 * summary["annual"].values)
+    ax.bar(xs, 100.0 * summary["annual"].values, color="#e67e22")
     ax.set_xticks(xs)
     ax.set_xticklabels(summary["lookback"].astype(int).astype(str))
     ax.yaxis.set_major_formatter(PercentFormatter(100.0))
@@ -1287,7 +1318,7 @@ def export_signal_bars_and_csv(R_eff: pd.DataFrame, W_eff_adj: pd.DataFrame, sca
             bottoms += 100*fam_y[col].values
         ax.set_xticks(xs); ax.set_xticklabels(fam_y.index.astype(int).astype(str))
         ax.yaxis.set_major_formatter(PercentFormatter(100.0))
-        ax.set_title("Family Contribution — Calendar‑Year (%)")
+        ax.set_title("Family Contribution — Calendar-Year (%)")
         ax.grid(True, axis='y', alpha=0.3); ax.legend(ncol=5, fontsize=8, bbox_to_anchor=(1.0, 1.02), loc="upper right")
         plt.tight_layout(); plt.savefig(VIZ_DIR / "PB_signal_family_contrib_calendar_bars_process_v6_btop50.png", bbox_inches="tight")
         if SHOW_FIGS: plt.show(); plt.close(fig)
@@ -1318,7 +1349,7 @@ def export_signal_bars_and_csv(R_eff: pd.DataFrame, W_eff_adj: pd.DataFrame, sca
             bottoms += 100*lb_y[col].values
         ax.set_xticks(xs); ax.set_xticklabels(lb_y.index.astype(int).astype(str))
         ax.yaxis.set_major_formatter(PercentFormatter(100.0))
-        ax.set_title("Lookback Contribution — Calendar‑Year (%)")
+        ax.set_title("Lookback Contribution — Calendar-Year (%)")
         ax.grid(True, axis='y', alpha=0.3); ax.legend(ncol=6, fontsize=8, bbox_to_anchor=(1.0, 1.02), loc="upper right")
         plt.tight_layout(); plt.savefig(VIZ_DIR / "PB_signal_lookback_contrib_calendar_bars_process_v6_btop50.png", bbox_inches="tight")
         if SHOW_FIGS: plt.show(); plt.close(fig)
@@ -1335,7 +1366,7 @@ def export_signal_bars_and_csv(R_eff: pd.DataFrame, W_eff_adj: pd.DataFrame, sca
         ax.bar(xs, mean_m.values)
         ax.set_xticks(xs); ax.set_xticklabels(mean_m.index, rotation=45, ha='right')
         ax.set_ylabel("% per month")
-        ax.set_title("Top‑10 Contracts — Mean Monthly Contribution (post‑overlay, %)")
+        ax.set_title("Top-10 Contracts — Mean Monthly Contribution (post-overlay, %)")
         ax.grid(True, axis='y', alpha=0.3)
         plt.tight_layout(); plt.savefig(VIZ_DIR / "PB_signal_contract_top10_contrib_bars_process_v6_btop50.png", bbox_inches="tight")
         if SHOW_FIGS: plt.show(); plt.close(fig)
@@ -1344,7 +1375,7 @@ def export_signal_bars_and_csv(R_eff: pd.DataFrame, W_eff_adj: pd.DataFrame, sca
         fig, ax = plt.subplots(figsize=(14, 8))
         for c in top:
             ax.plot(_to_naive(rc.index), 100*rc[c], label=c, lw=1.2)
-        ax.set_title("Top‑10 Contracts — Rolling 63‑day Contribution (%)")
+        ax.set_title("Top-10 Contracts — Rolling 63-day Contribution (%)")
         ax.yaxis.set_major_formatter(PercentFormatter(100.0))
         ax.grid(True, alpha=0.3); ax.legend(ncol=5)
         plt.tight_layout(); plt.savefig(VIZ_DIR / "PB_signal_contract_top10_contrib_process_v6_btop50.png", bbox_inches="tight")
@@ -1383,9 +1414,40 @@ def export_signal_bars_and_csv(R_eff: pd.DataFrame, W_eff_adj: pd.DataFrame, sca
     for c in contrib_by_ctrt.columns:
         ac = ASSET_CLASS_MAP.get(c, "Other")
         contrib_daily_ac_df[ac] = contrib_daily_ac_df[ac] + contrib_by_ctrt[c]
+
     rolling_ac = contrib_daily_ac_df.rolling(63).sum().dropna()
     if len(rolling_ac) > 0:
         plot_asset_class_rolling_contrib(rolling_ac, VIZ_DIR / "PB_asset_class_rolling_contrib_process_v6_btop50.png")
+
+    monthly = contrib_daily_ac_df.resample("M").sum()
+    if "Energy" in monthly.columns or "Metals" in monthly.columns:
+        monthly = monthly.copy()
+        monthly["Commodities"] = monthly.get("Energy", 0.0) + monthly.get("Metals", 0.0)
+        monthly = monthly.drop(columns=[c for c in ["Energy","Metals"] if c in monthly.columns])
+    rb_order = ["Bond", "Equity", "FX", "Commodities"]
+    monthly = monthly[[c for c in rb_order if c in monthly.columns] + [c for c in monthly.columns if c not in rb_order]]
+
+    data = monthly.T
+    if data.size > 0:
+        bound = np.nanpercentile(np.abs(data.values), 98)
+        bound = float(bound if np.isfinite(bound) and bound > 0 else 0.1)
+        fig, ax = plt.subplots(figsize=(12, 6))
+        im = ax.imshow(data, aspect="auto", cmap="RdBu_r", vmin=-bound, vmax=bound)
+        ax.set_yticks(range(len(data.index)))
+        ax.set_yticklabels(data.index)
+        step = max(1, len(data.columns)//15) if len(data.columns) else 1
+        xticks = range(0, len(data.columns), step)
+        ax.set_xticks(list(xticks))
+        ax.set_xticklabels([data.columns[i].strftime("%Y-%m") for i in xticks] if len(data.columns) else [], rotation=45, ha="right")
+        ax.set_title("Monthly Avg Asset-Class Contribution Heatmap", fontsize=12, weight="bold")
+        ax.set_xlabel("Date")
+        ax.set_ylabel("Asset Class")
+        plt.colorbar(im, ax=ax, label="Contribution")
+        plt.tight_layout()
+        outpath = VIZ_DIR / "asset_exposures_heatmap_from_contrib_process_v6_btop50.png"
+        plt.savefig(outpath, bbox_inches="tight")
+        if SHOW_FIGS: plt.show(); plt.close(fig)
+        else: plt.close(fig)
 
 def export_timeavg_lookback_weights_csv(W_eff_adj: pd.DataFrame):
     w_by_lb = W_eff_adj.abs().groupby(axis=1, level="lookback").sum()

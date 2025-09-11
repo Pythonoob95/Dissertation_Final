@@ -1409,7 +1409,7 @@ def export_turnover_by_lookback(W_eff_adj: pd.DataFrame):
                                        "annual": "{:.2f}%".format}))
     fig, ax = plt.subplots(figsize=(14, 8))
     xs = np.arange(len(summary))
-    ax.bar(xs, 100.0 * summary["annual"].values)
+    ax.bar(xs, 100.0 * summary["annual"].values, color="#e67e22")
     ax.set_xticks(xs)
     ax.set_xticklabels(summary["lookback"].astype(int).astype(str))
     ax.yaxis.set_major_formatter(PercentFormatter(100.0))
@@ -1670,53 +1670,42 @@ def export_signal_bars_and_csv(R_eff: pd.DataFrame, W_eff_adj: pd.DataFrame,
         plt.tight_layout(); plt.savefig(CFG.VIZ_DIR / "PB_signal_lookback_contrib_calendar_bars_process_v6.png", bbox_inches="tight")
         if SHOW_FIGS: plt.show(); plt.close(fig)
         else: plt.close(fig)
+
     ctrt_daily = contrib_daily.groupby(axis=1, level='contract').sum()
-    ctrt_daily.to_csv(CFG.VIZ_DIR / "pb_signal_contract_contrib_daily_process_v6.csv", float_format="%.8f")
-    avg_abs = ctrt_daily.abs().mean().sort_values(ascending=False)
-    top = list(avg_abs.head(10).index)
-    if top:
-        cm = ctrt_daily[top].resample("M").sum()
-        mean_m = 100*cm.mean().sort_values(ascending=False)
-        fig, ax = plt.subplots(figsize=(14, 8))
-        xs = np.arange(len(mean_m))
-        ax.bar(xs, mean_m.values)
-        ax.set_xticks(xs); ax.set_xticklabels(mean_m.index, rotation=45, ha='right')
-        ax.set_ylabel("% per month")
-        ax.set_title("Top‑10 Contracts — Mean Monthly Contribution (post‑overlay, %)")
-        ax.grid(True, axis='y', alpha=0.3)
-        plt.tight_layout(); plt.savefig(CFG.VIZ_DIR / "PB_signal_contract_top10_contrib_bars_process_v6.png", bbox_inches="tight")
+    class_map = pd.Series({c: ASSET_CLASS_MAP.get(c, "Other") for c in ctrt_daily.columns})
+    contrib_daily_ac = ctrt_daily.groupby(class_map, axis=1).sum()
+
+    monthly = contrib_daily_ac.resample("M").sum()
+    if "Energy" in monthly.columns or "Metals" in monthly.columns:
+        monthly = monthly.copy()
+        monthly["Commodities"] = monthly.get("Energy", 0.0) + monthly.get("Metals", 0.0)
+        monthly = monthly.drop(columns=[c for c in ["Energy","Metals"] if c in monthly.columns])
+
+    rb_order = ["Rates", "Equity", "FX", "Commodities"]
+    monthly = monthly[[c for c in rb_order if c in monthly.columns] + [c for c in monthly.columns if c not in rb_order]]
+
+    data = monthly.T
+    if data.size > 0:
+        bound = np.nanpercentile(np.abs(data.values), 98)
+        bound = float(bound if np.isfinite(bound) and bound > 0 else 0.1)
+        fig, ax = plt.subplots(figsize=(12, 6))
+        im = ax.imshow(data, aspect="auto", cmap="RdBu_r", vmin=-bound, vmax=bound)
+        ax.set_yticks(range(len(data.index)))
+        ax.set_yticklabels(data.index)
+        step = max(1, len(data.columns)//15) if len(data.columns) else 1
+        xticks = range(0, len(data.columns), step)
+        ax.set_xticks(list(xticks))
+        ax.set_xticklabels([data.columns[i].strftime("%Y-%m") for i in xticks] if len(data.columns) else [], rotation=45, ha="right")
+        ax.set_title("Monthly Avg Asset-Class Contribution Heatmap", fontsize=12, weight="bold")
+        ax.set_xlabel("Date")
+        ax.set_ylabel("Asset Class")
+        plt.colorbar(im, ax=ax, label="Contribution")
+        plt.tight_layout()
+        outpath = CFG.VIZ_DIR / "asset_exposures_heatmap_from_contrib_process_v6.png"
+        plt.savefig(outpath, bbox_inches="tight")
         if SHOW_FIGS: plt.show(); plt.close(fig)
         else: plt.close(fig)
-        rc = ctrt_daily[top].rolling(63).sum()
-        fig, ax = plt.subplots(figsize=(14, 8))
-        for c in top:
-            ax.plot(rc.index, 100*rc[c], label=c, lw=1.2)
-        ax.set_title("Top‑10 Contracts — Rolling 3m Contribution (%)")
-        ax.yaxis.set_major_formatter(PercentFormatter(100.0))
-        ax.grid(True, alpha=0.3); ax.legend(ncol=5)
-        plt.tight_layout(); plt.savefig(CFG.VIZ_DIR / "PB_signal_contract_top10_contrib_process_v6.png", bbox_inches="tight")
-        if SHOW_FIGS: plt.show(); plt.close(fig)
-        else: plt.close(fig)
-    bench = y_eff.reindex(fam_daily.index)
-    fam_te = {}
-    base_res = (fam_daily.sum(axis=1) - bench)
-    base_te = base_res.rolling(252).std() * np.sqrt(252)
-    for fam in fam_daily.columns:
-        without = (fam_daily.drop(columns=[fam]).sum(axis=1) - bench)
-        te_wo = without.rolling(252).std() * np.sqrt(252)
-        fam_te[fam] = (base_te - te_wo).mean()
-    fam_te = pd.Series(fam_te).sort_values(ascending=False)
-    fam_te.to_frame("te_contribution").to_csv(CFG.VIZ_DIR / "pb_signal_family_TE_contrib_process_v6.csv", float_format="%.8f")
-    fig, ax = plt.subplots(figsize=(12, 6))
-    xs = np.arange(len(fam_te))
-    ax.bar(xs, 100*fam_te.values)
-    ax.set_xticks(xs); ax.set_xticklabels(fam_te.index)
-    ax.set_ylabel("Avg reduction in TE (pp)")
-    ax.set_title("Family Contribution to Tracking Error (higher = more TE explained)")
-    ax.grid(True, axis='y', alpha=0.3)
-    plt.tight_layout(); plt.savefig(CFG.VIZ_DIR / "PB_signal_family_TE_contrib_process_v6.png", bbox_inches="tight")
-    if SHOW_FIGS: plt.show(); plt.close(fig)
-    else: plt.close(fig)
+
 
 def export_library_coverage_heatmap(R_eff: pd.DataFrame):
     live = R_eff.notna().mean(axis=0)

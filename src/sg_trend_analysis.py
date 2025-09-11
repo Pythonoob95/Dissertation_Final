@@ -599,14 +599,21 @@ def run_extended_diagnostics(results, benchmark, oos_start_date, analysis_out: P
         coeffs_container = results.get('large_results') if has_large else (results.get('small_results') if has_small else results)
         coeffs = coeffs_container.get('ema_coef_final', None) if isinstance(coeffs_container, dict) else None
         if coeffs:
-            sectors = {'Currencies': ['AUD','CAD','CHF','EUR','GBP','JPY'],'Bonds': ['US2Y','US5Y','US10Y','BOBL','BUND'],'Equities': ['S&P500','NASDAQ','DOW','EUROSTOXX','DAX','FTSE','TOPIX','HSI'],'Commodities': ['WTI_CRUDE','BRENT_CRUDE','GASOIL','GOLD','SILVER','COPPER']}
+            sectors = {
+                'Currencies': ['AUD','CAD','CHF','EUR','GBP','JPY','NZD','SEK','NOK','MXN','AD','CD','BP','EC','JY'],
+                'Bonds': ['US2Y','US5Y','US10Y','US30Y','BOBL','BUND','BTP','GILT','JGB','TY','FV','TU','ZN','ZB','ZT','ZF','GE','ED','FF','RX'],
+                'Equities': ['S&P500','SP500','ES','NASDAQ','NQ','DOW','YM','EUROSTOXX','EUROSTX','FESX','SX5E','DAX','FTSE','TOPIX','TPX','NI','HSI','HANGSENG','NIKKEI','NKY','RTY','RUSSELL'],
+                'Commodities': ['WTI_CRUDE','CRUDE_W','CL','BRENT_CRUDE','BRENT_W','BRE','BRN','CO','GASOIL','QS','GO','HEATING_OIL','HO','RBOB','RB','NATGAS','NG','GOLD','GC','SILVER','SI','COPPER','HG','ALUMINUM','AL','PLATINUM','PL','PALLADIUM','PA']
+            }
             sector_weights = {}
             for lookback, coef in coeffs.items():
                 w_by_sector = {}
                 for sector, insts in sectors.items():
                     w_by_sector[sector] = float(coef[coef.index.isin(insts)].abs().sum())
-                total = float(sum(w_by_sector.values())) + 1e-12
-                sector_weights[f'{lookback}d'] = {k: v/total for k, v in w_by_sector.items()}
+                row_total = float(sum(w_by_sector.values()))
+                if row_total <= 0:
+                    continue
+                sector_weights[f'{lookback}d'] = {k: (v / row_total) for k, v in w_by_sector.items()}
             if sector_weights:
                 dfw = pd.DataFrame(sector_weights).T
                 fig, ax = plt.subplots(figsize=(10, 6))
@@ -1644,6 +1651,10 @@ def analyze_exposures(results_dual_sg, X_large_full, X_small_full, ret_sg, mode:
                 for inst, ac in amap.items():
                     if inst in large_avg.columns:
                         large_exp[ac] += large_avg[inst]
+    if small_exp is not None and 'Other' in small_exp.columns:
+        small_exp = small_exp.drop(columns=['Other'])
+    if large_exp is not None and 'Other' in large_exp.columns:
+        large_exp = large_exp.drop(columns=['Other'])
     if small_exp is not None:
         small_exp.to_parquet(exposure_dir / "exposure_small_assetclass_rev26.parquet", compression='gzip')
     if large_exp is not None:
@@ -1673,6 +1684,8 @@ def analyze_exposures(results_dual_sg, X_large_full, X_small_full, ret_sg, mode:
             combined_fixed.loc[dt] = small_al.loc[dt]*ws + large_al.loc[dt]*wl
     else:
         combined_fixed = large_exp if large_exp is not None else small_exp
+    if combined_fixed is not None and 'Other' in combined_fixed.columns:
+        combined_fixed = combined_fixed.drop(columns=['Other'])
     if combined_fixed is not None:
         combined_fixed.to_parquet(exposure_dir / "exposure_combined_assetclass_FIXED_rev26.parquet", compression='gzip')
         create_exposure_visualizations(small_exp, large_exp, combined_fixed, all_ac, exposure_dir, mode=mode, show_plots=SHOW_PLOTS)
