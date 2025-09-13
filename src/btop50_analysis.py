@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import os
 import gzip
 import pickle
@@ -8,13 +7,11 @@ import warnings
 from dataclasses import dataclass
 from collections import defaultdict
 from pathlib import Path
-
 import numpy as np
 import pandas as pd
 import matplotlib
 import matplotlib.pyplot as plt
 import seaborn as sns
-
 from tqdm import tqdm
 from sklearn.linear_model import ElasticNet, LinearRegression
 from sklearn.model_selection import TimeSeriesSplit
@@ -159,7 +156,7 @@ def to_naive(ts) -> pd.Timestamp | None:
     if ts is None:
         return None
     t = pd.to_datetime(ts, errors="coerce")
-    if t is pd.NaT:
+    if pd.isna(t):
         return None
     if getattr(t, "tzinfo", None) is None:
         return t
@@ -167,7 +164,7 @@ def to_naive(ts) -> pd.Timestamp | None:
 
 def _as_naive_dt(x):
     ts = pd.to_datetime(x, errors="coerce")
-    if ts is pd.NaT:
+    if pd.isna(ts):
         return ts
     if ts.tzinfo is None:
         return ts
@@ -178,7 +175,7 @@ def annotate_crisis_periods(ax, y_position: str = 'top'):
     for start, end, label in CRISIS_PERIODS:
         sdt = _as_naive_dt(start)
         edt = _as_naive_dt(end)
-        if sdt is pd.NaT or edt is pd.NaT:
+        if pd.isna(sdt) or pd.isna(edt):
             continue
         sn, en = mdates.date2num(sdt), mdates.date2num(edt)
         if en < xlim[0] or sn > xlim[1]:
@@ -361,8 +358,7 @@ def process_btop50_data() -> pd.Series:
         print(f"{sheet:<24}| rows {excess_daily.count():6,d}")
     if not excess_map:
         raise ValueError(
-            f"Could not parse any usable sheet from '{BTOP50_EXCEL_PATH.name}'. "
-            "Ensure there is a date column and either a Return or Index/Level column."
+            f"Could not parse any usable sheet from '{BTOP50_EXCEL_PATH.name}'. Ensure there is a date column and either a Return or Index/Level column."
         )
     key = next((k for k in excess_map if "BTOP" in k.upper()), list(excess_map.keys())[0])
     y_excess = excess_map[key].dropna()
@@ -1116,6 +1112,7 @@ def create_returns_based_visualizations(
 def compute_drawdown_attribution_single(results: dict, benchmark: pd.Series):
     return {}
 
+
 def run_extended_diagnostics(
     results: dict,
     benchmark: pd.Series,
@@ -1127,10 +1124,17 @@ def run_extended_diagnostics(
     ret = results['combined']
     benchmark = benchmark.loc[ret.index]
     suffix = SUFFIX
+
+    def _index_to_naive(idx: pd.DatetimeIndex) -> pd.DatetimeIndex:
+        if getattr(idx, "tz", None) is None:
+            return idx
+        return idx.tz_convert("UTC").tz_localize(None)
+
     def _calculate_drawdown(returns):
         cum = (1 + returns).cumprod()
         run_max = cum.expanding().max()
         return (cum - run_max) / run_max
+
     try:
         print("\n=== EXT — Turnover & Cost Diagnostics (Large-only) ===")
         t_large = results.get('turnover_metrics', {})
@@ -1155,6 +1159,41 @@ def run_extended_diagnostics(
         print(f"Turnover diagnostics failed: {e}")
 
     try:
+        print("\n=== EXT D — Universe Contribution Heatmap (sector × lookback) ===")
+        coeffs = results.get('ema_coef_final', None)
+        if coeffs:
+            sectors = {
+                'Currencies':  ['AUD','CAD','CHF','EUR','GBP','JPY','NZD','SEK','NOK','MXN','AD','CD','BP','EC','JY'],
+                'Bonds':       ['US2Y','US5Y','US10Y','US30Y','BOBL','BUND','BTP','GILT','JGB','TY','FV','TU','ZN','ZB','ZT','ZF','GE','ED','FF','RX'],
+                'Equities':    ['S&P500','SP500','ES','NASDAQ','NQ','DOW','YM','EUROSTOXX','EUROSTX','FESX','SX5E','DAX','FTSE','TOPIX','TPX','NI','HSI','HANGSENG','NIKKEI','NKY','RTY','RUSSELL'],
+                'Commodities': ['WTI_CRUDE','CRUDE_W','CL','BRENT_CRUDE','BRENT_W','BRE','BRN','CO','GASOIL','QS','GO','HEATING_OIL','HO','RBOB','RB','NATGAS','NG','GOLD','GC','SILVER','SI','COPPER','HG','ALUMINUM','AL','PLATINUM','PL','PALLADIUM','PA']
+            }
+            order = ['Currencies','Bonds','Equities','Commodities']
+            sector_weights = {}
+            for lookback, coef in coeffs.items():
+                s = pd.Series(coef, dtype=float)
+                w_by_sector = {sec: float(s.abs()[s.index.isin(insts)].sum()) for sec, insts in sectors.items()}
+                row_total = float(sum(w_by_sector.values()))
+                if row_total <= 0:
+                    continue
+                sector_weights[f'{lookback}d'] = {k: (v / row_total) for k, v in w_by_sector.items()}
+            if sector_weights:
+                dfw = pd.DataFrame(sector_weights).T.reindex(columns=order)
+                (100*dfw).to_csv(analysis_out / f"D_universe_contribution_heatmap_{suffix}.csv", float_format="%.2f")
+                fig, ax = plt.subplots(figsize=(10, 6))
+                sns.heatmap(dfw, annot=True, fmt='.2%', cmap='YlOrRd',
+                            cbar_kws={'label': 'Risk Allocation (%)'}, ax=ax)
+                ax.set_title('Risk Allocation by Sector and Lookback', fontsize=14, weight='bold')
+                ax.set_xlabel('Sector'); ax.set_ylabel('Lookback')
+                savefig_and_maybe_show(fig, analysis_out / f"D_universe_contribution_heatmap_{suffix}.png", show=show_plots)
+            else:
+                print("D skipped — coefficients had no sector overlap.")
+        else:
+            print("D skipped — ema_coef_final not found in results.")
+    except Exception as e:
+        print(f"D failed: {e}")
+
+    try:
         print("\n=== EXT — Lookback Model Blend Weights ===")
         beta_hist = results.get('beta_history', None)
         if beta_hist is not None and not beta_hist.empty:
@@ -1169,22 +1208,19 @@ def run_extended_diagnostics(
             ax.stackplot(idx, [beta_norm[c].values for c in beta_norm.columns],
                          labels=[f'{c}d' for c in beta_norm.columns], alpha=0.85, linewidth=0.6)
             ax.set_title('Evolution of Lookback Blend Weights (Returns-based)', fontsize=14, weight='bold')
-            ax.set_ylabel('Normalized Weight');
-            ax.set_xlabel('Date');
-            ax.set_ylim(0, 1)
-            ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1));
-            ax.grid(True, alpha=0.3)
+            ax.set_ylabel('Normalized Weight'); ax.set_xlabel('Date'); ax.set_ylim(0, 1)
+            ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1)); ax.grid(True, alpha=0.3)
             if oos_start_date:
                 ax.axvline(to_naive(oos_start_date), color='black', linestyle='--', alpha=0.7, linewidth=2)
             beta_no_inter.to_csv(analysis_out / f"E_lookback_blend_weights_raw_{suffix}.csv")
-            denom.rename("sum_abs_weights").to_frame().to_csv(
-                analysis_out / f"E_lookback_blend_weights_denominator_{suffix}.csv")
+            denom.rename("sum_abs_weights").to_frame().to_csv(analysis_out / f"E_lookback_blend_weights_denominator_{suffix}.csv")
             beta_norm.to_csv(analysis_out / f"E_lookback_blend_weights_{suffix}.csv")
             savefig_and_maybe_show(fig, analysis_out / f"E_lookback_blend_weights_{suffix}.png", show=show_plots)
         else:
             print("No beta_history available.")
     except Exception as e:
         print(f"Lookback weights failed: {e}")
+
     try:
         print("\n=== EXT — Residuals Diagnostics (Model − BTOP50) ===")
         res = (ret - benchmark).dropna()
@@ -1196,8 +1232,7 @@ def run_extended_diagnostics(
         ax.grid(True, alpha=0.3)
         savefig_and_maybe_show(fig, analysis_out / f"F_residuals_hist_{suffix}.png", show=show_plots)
         fig, ax = plt.subplots(figsize=(14, 6))
-        idx = _index_to_naive(res.index)
-        ax.plot(idx, res.cumsum().values, lw=1.8, color=COLOR_PALETTE.get('model', '#d62728'))
+        ax.plot(_index_to_naive(res.index), res.cumsum().values, lw=1.8, color=COLOR_PALETTE.get('model', '#d62728'))
         ax.set_title('Cumulative Residual P&L (Alpha over BTOP50)', fontsize=14, weight='bold')
         ax.set_ylabel('Cumulative residual (sum of daily returns)'); ax.set_xlabel('Date')
         ax.grid(True, alpha=0.3)
@@ -1207,6 +1242,7 @@ def run_extended_diagnostics(
         savefig_and_maybe_show(fig, analysis_out / f"F_residuals_cum_{suffix}.png", show=show_plots)
     except Exception as e:
         print(f"Residuals failed: {e}")
+
     try:
         print("\n=== EXT — Drawdown Analysis ===")
         dd_model = _calculate_drawdown(ret)
@@ -1222,7 +1258,7 @@ def run_extended_diagnostics(
         idx = _index_to_naive(dd_diff.index)
         ax2.fill_between(idx, 0, dd_diff.values*100, where=(dd_diff.values >= 0), alpha=0.5,
                          color=COLOR_PALETTE['normal'], label='Returns-based Better')
-        ax2.fill_between(idx, 0, dd_diff.values*100, where=(dd_diff.values < 0), alpha=0.5,
+        ax2.fill_between(idx, 0, dd_diff.values*100, where=(ddiff := dd_diff.values) < 0, alpha=0.5,
                          color=COLOR_PALETTE['crisis'], label='BTOP50 Better')
         ax2.set_ylabel('DD Diff (%)'); ax2.set_xlabel('Date'); ax2.legend(); ax2.grid(True, alpha=0.3); ax2.axhline(0, color='black', alpha=0.5)
         for ax in (ax1, ax2):
@@ -1232,33 +1268,30 @@ def run_extended_diagnostics(
         savefig_and_maybe_show(fig, analysis_out / f"H_drawdown_analysis_{suffix}.png", show=show_plots)
     except Exception as e:
         print(f"Drawdown analysis failed: {e}")
+
     try:
         print("\n=== EXT — Monthly Return Heatmap ===")
         monthly_ret = ret.resample('M').sum() * 100
         years = monthly_ret.index.year
         months = monthly_ret.index.month
         dfp = pd.DataFrame({'Year': years, 'Month': months, 'Return': monthly_ret.values})
-        heat = dfp.pivot(index='Year', columns='Month', values='Return')
         colors = [(0.8,0,0), (1,1,1), (0,0.8,0)]
         cmap = LinearSegmentedColormap.from_list('custom', colors, N=100)
         fig, ax = plt.subplots(figsize=(14, 8))
-        sns.heatmap(heat, annot=True, fmt='.1f', cmap=cmap, center=0,
+        sns.heatmap(dfp.pivot(index='Year', columns='Month', values='Return'), annot=True, fmt='.1f', cmap=cmap, center=0,
                     cbar_kws={'label': 'Monthly Return (%)'}, ax=ax,
                     xticklabels=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'])
         ax.set_title('Monthly Returns Heatmap — Returns-based', fontsize=14, weight='bold'); ax.set_xlabel('Month'); ax.set_ylabel('Year')
         savefig_and_maybe_show(fig, analysis_out / f"I_monthly_return_heatmap_{suffix}.png", show=show_plots)
     except Exception as e:
         print(f"Monthly heatmap failed: {e}")
+
     try:
         print("\n=== EXT — Calendar-Year Bars (Model, Benchmark, Alpha) ===")
         ann_model = ret.resample('Y').sum()
         ann_bench = benchmark.resample('Y').sum().reindex(ann_model.index)
         ann_alpha = ann_model - ann_bench
-        out = pd.DataFrame({
-            'model': ann_model,
-            'benchmark': ann_bench,
-            'alpha': ann_alpha
-        })
+        out = pd.DataFrame({'model': ann_model, 'benchmark': ann_bench, 'alpha': ann_alpha})
         out.index = out.index.year
         out.index.name = 'year'
         out.to_csv(analysis_out / f"Y_calendar_year_bars_{suffix}.csv")
@@ -1279,6 +1312,7 @@ def run_extended_diagnostics(
         savefig_and_maybe_show(fig, analysis_out / f"Y_calendar_year_bars_{suffix}.png", show=show_plots)
     except Exception as e:
         print(f"Calendar-year bars failed: {e}")
+
     try:
         print("\n=== EXT — Blender Drift vs Residual TE ===")
         beta_hist = results.get('beta_history', None)
@@ -1299,6 +1333,7 @@ def run_extended_diagnostics(
             print("No beta_history found — skipped blender drift.")
     except Exception as e:
         print(f"Blender vs residuals failed: {e}")
+
     try:
         print("\n=== EXT — Lookback Contribution to Alpha (monthly) ===")
         preds = results.get('predictions_per_model', None)
@@ -1323,6 +1358,7 @@ def run_extended_diagnostics(
             print("No predictions_per_model — skipped alpha contribution.")
     except Exception as e:
         print(f"Alpha contribution failed: {e}")
+
     print("\nExtended diagnostics complete.")
 
 def create_exposure_visualizations(results: dict, out_dir: Path = RB_DIR, show_plots: bool = SHOW_PLOTS):
